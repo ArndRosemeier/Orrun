@@ -63,6 +63,13 @@ func has_patch() -> bool:
 	return _has_patch
 
 
+## Drops the current backdrop so the next refresh rebuilds from live config.
+func clear() -> void:
+	_has_patch = false
+	centre = Vector2.ZERO
+	mesh = null
+
+
 ## True when the player has walked far enough that the patch should recentre.
 ## Half a sector of slack keeps this from rebuilding every time they step back
 ## and forth across a boundary.

@@ -25,6 +25,10 @@ pub struct FillParams {
 	pub trunk_bank_rise: f32,
 	pub swell_height: f32,
 	pub mountain_detail: f32,
+	pub mountain_octaves: i32,
+	pub mountain_gain: f32,
+	pub mountain_sharpness: f32,
+	pub mountain_macro_contrast: f32,
 	pub warp_strength: f32,
 	pub ocean_floor_margin: f32,
 	pub inland_freeboard: f32,
@@ -41,6 +45,10 @@ pub struct FillParams {
 	pub swell_scale: f32,
 	pub mountain_noise_scale: f32,
 	pub warp_scale: f32,
+}
+
+fn clamp_octaves(n: i32) -> i32 {
+	n.clamp(1, 6)
 }
 
 pub fn fill_window(
@@ -60,8 +68,14 @@ pub fn fill_window(
 	let span = cells as f32 * cs;
 	let radius = p.max_valley_radius;
 
-	let swell = Noise2D::from_period_fbm(p.seed_swell, p.swell_scale, 4, 0.52, 2.1);
-	let mountain = Noise2D::from_period_ridged(p.seed_mountain, p.mountain_noise_scale, 5, 0.5, 2.05);
+	let swell = Noise2D::from_period_fbm(p.seed_swell, p.swell_scale, 3, 0.48, 2.1);
+	let mountain = Noise2D::from_period_ridged(
+		p.seed_mountain,
+		p.mountain_noise_scale,
+		clamp_octaves(p.mountain_octaves),
+		p.mountain_gain,
+		2.05,
+	);
 	let warp_a = Noise2D::from_period_fbm(p.seed_warp_a, p.warp_scale, 3, 0.5, 2.0);
 	let warp_b = Noise2D::from_period_fbm(p.seed_warp_b, p.warp_scale, 3, 0.5, 2.0);
 	let moisture_n = Noise2D::from_period_fbm(p.seed_moisture, 2100.0, 3, 0.5, 2.0);
@@ -98,6 +112,8 @@ pub fn fill_window(
 				p.warp_strength,
 				p.swell_height,
 				p.mountain_detail,
+				p.mountain_sharpness,
+				p.mountain_macro_contrast,
 			);
 			height = carve_valleys(
 				height,
@@ -105,9 +121,14 @@ pub fn fill_window(
 				wz,
 				bin,
 				&rivers,
+				&relief01,
+				p.atlas_size,
 				p.trunk_valley_radius,
 				p.trunk_valley_per_class,
 				p.trunk_bank_rise,
+				p.mountain_detail,
+				p.swell_height,
+				p.mountain_macro_contrast,
 			);
 			height = shore_authority(
 				height,
@@ -195,21 +216,54 @@ fn base_height(
 	warp_strength: f32,
 	swell_height: f32,
 	mountain_detail: f32,
+	mountain_sharpness: f32,
+	mountain_macro_contrast: f32,
 ) -> f32 {
 	let warp_x = warp_a.get(world_x, world_z) * warp_strength;
 	let warp_z = warp_b.get(world_x, world_z) * warp_strength;
 	let px = world_x + warp_x;
 	let pz = world_z + warp_z;
 
-	let base = fields::sample_smooth(elevation_m, atlas_size, world_x, world_z);
 	let relief = fields::sample_smooth(relief01, atlas_size, world_x, world_z);
+	let base = atlas_base_steepened(
+		elevation_m,
+		atlas_size,
+		world_x,
+		world_z,
+		relief,
+		mountain_macro_contrast,
+	);
 	let wet = fields::sample_smooth(water_flag, atlas_size, world_x, world_z).clamp(0.0, 1.0);
 	let dryness = lerp(0.18, 1.0, 1.0 - wet);
 
 	let swell_v = swell.get(px, pz) * swell_height * lerp(1.0, 0.4, relief);
-	let ridge01 = mountain.get(px * 0.9, pz * 0.9) * 0.5 + 0.5;
-	let ridge = (ridge01 - 0.4) * mountain_detail * relief * relief;
+	let ridge01 = (mountain.get(px * 0.9, pz * 0.9) * 0.5 + 0.5).clamp(0.0, 1.0);
+	let shaped = ridge01.powf(mountain_sharpness.max(0.5));
+	let ridge = (shaped - 0.35) * mountain_detail * lerp(0.35, 1.0, relief);
 	base + (swell_v + ridge) * dryness
+}
+
+fn atlas_base_steepened(
+	elevation_m: &PackedFloat32Array,
+	atlas_size: i32,
+	world_x: f32,
+	world_z: f32,
+	relief: f32,
+	contrast: f32,
+) -> f32 {
+	let e0 = fields::sample_smooth(elevation_m, atlas_size, world_x, world_z);
+	if contrast <= 1.001 || relief < 0.04 {
+		return e0;
+	}
+	let r = 1400.0;
+	let e_avg = (
+		fields::sample_smooth(elevation_m, atlas_size, world_x - r, world_z)
+			+ fields::sample_smooth(elevation_m, atlas_size, world_x + r, world_z)
+			+ fields::sample_smooth(elevation_m, atlas_size, world_x, world_z - r)
+			+ fields::sample_smooth(elevation_m, atlas_size, world_x, world_z + r)
+	) * 0.25;
+	let amount = lerp(1.0, contrast, relief.clamp(0.0, 1.0));
+	e_avg + (e0 - e_avg) * amount
 }
 
 fn carve_valleys(
@@ -218,11 +272,21 @@ fn carve_valleys(
 	world_z: f32,
 	bases: &[i32],
 	rivers: &PackedFloat32Array,
+	relief01: &PackedFloat32Array,
+	atlas_size: i32,
 	trunk_valley_radius: f32,
 	trunk_valley_per_class: f32,
 	trunk_bank_rise: f32,
+	mountain_detail: f32,
+	swell_height: f32,
+	mountain_macro_contrast: f32,
 ) -> f32 {
 	let mut out = height;
+	let relief = fields::sample_smooth(relief01, atlas_size, world_x, world_z);
+	let detail_amp = mountain_detail * lerp(0.35, 1.0, relief) * 0.65
+		+ swell_height * lerp(1.0, 0.4, relief) * 0.35
+		+ (mountain_macro_contrast - 1.0).max(0.0) * 40.0 * relief;
+	let min_gutter = trunk_bank_rise + detail_amp;
 	for &base_i in bases {
 		let base = base_i as usize;
 		if base + 8 >= rivers.len() {
@@ -245,7 +309,8 @@ fn carve_valleys(
 		if d >= radius {
 			continue;
 		}
-		let floor_z = (ay + (by - ay) * t + trunk_bank_rise).min(height);
+		let atlas_floor = ay + (by - ay) * t + trunk_bank_rise;
+		let floor_z = atlas_floor.min(height - min_gutter).min(height);
 		let ramp = smoothstep(0.0, radius, d);
 		out = out.min(lerp(floor_z, height, ramp));
 	}

@@ -9,6 +9,7 @@ extends GenQueue.Job
 var context: WorldContext
 var centre: Vector2
 var result: FarTerrain.Patch
+var mesh_epoch: int = 0
 
 
 func run() -> void:

@@ -45,12 +45,22 @@ func _test_elevation_mapping() -> void:
 	_check("sea code 0 is below sea", AtlasPack.elevation_to_metres(0) < 0)
 	_check("sea code 32 is sea level", AtlasPack.elevation_to_metres(32) == 0)
 	_check("coast band positive", AtlasPack.elevation_to_metres(40) > 0)
-	_check("peaks high", AtlasPack.elevation_to_metres(255) >= 900)
+	_check("coast band capped", AtlasPack.elevation_to_metres(40) <= int(AtlasPack.COAST_MAX_M) + 1)
+	_check("plains stay walkable", AtlasPack.elevation_to_metres(120) < 500)
+	_check("mountain band alpine", AtlasPack.elevation_to_metres(200) >= 1200)
+	_check("peaks Alps-scale", AtlasPack.elevation_to_metres(255) >= 3500)
+	_check("peak endpoint", AtlasPack.elevation_to_metres(255) <= int(AtlasPack.PEAK_MAX_M))
 	_check(
 		"metres round-trip near plains",
 		absi(
 			AtlasPack.elevation_to_metres(AtlasPack.metres_to_elevation(100)) - 100
-		) <= 8
+		) <= 12
+	)
+	_check(
+		"metres round-trip near peaks",
+		absi(
+			AtlasPack.elevation_to_metres(AtlasPack.metres_to_elevation(3000)) - 3000
+		) <= 80
 	)
 
 

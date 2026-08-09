@@ -1,4 +1,4 @@
-[gd_scene load_steps=11 format=3]
+[gd_scene load_steps=12 format=3]
 
 [ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
 [ext_resource type="Script" path="res://scripts/world/streamer.gd" id="2_streamer"]
@@ -6,6 +6,7 @@
 [ext_resource type="Script" path="res://scripts/debug/debug_hud.gd" id="4_hud"]
 [ext_resource type="Script" path="res://scripts/debug/hydro_map.gd" id="5_map"]
 [ext_resource type="Script" path="res://scripts/atlas/atlas_viewer.gd" id="6_world_map"]
+[ext_resource type="Script" path="res://scripts/debug/terrain_tune_panel.gd" id="7_tune"]
 
 [sub_resource type="ProceduralSkyMaterial" id="Sky_1"]
 sky_top_color = Color(0.35, 0.52, 0.78, 1)
@@ -117,6 +118,19 @@ grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
 script = ExtResource("6_world_map")
+
+[node name="TerrainTune" type="Control" parent="UI"]
+visible = false
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -360.0
+offset_top = 12.0
+offset_right = -12.0
+offset_bottom = 700.0
+grow_horizontal = 0
+mouse_filter = 0
+script = ExtResource("7_tune")
 
 [node name="Loading" type="Label" parent="UI"]
 anchors_preset = 8

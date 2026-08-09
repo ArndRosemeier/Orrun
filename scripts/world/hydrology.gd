@@ -539,8 +539,22 @@ func _mark_channels() -> void:
 	var count: int = filled.size()
 	is_channel = PackedInt32Array()
 	is_channel.resize(count)
-	var threshold: float = config.river_accum_threshold
+	var base_threshold: float = config.river_accum_threshold
+	var hills_amp: float = config.relief_amp_hills
+	var mtn_amp: float = config.relief_amp_mountains
 	for i in count:
+		# Steep alpine faces spawn parallel “comb” brooks at the base threshold;
+		# demand more catchment before a visible local channel is published.
+		var threshold: float = base_threshold
+		var elev: float = terrain.elevation[i]
+		var amp: float = terrain.relief_amp[i]
+		if elev > 700.0:
+			threshold *= lerpf(1.0, 3.2, clampf((elev - 700.0) / 1600.0, 0.0, 1.0))
+		if amp > hills_amp:
+			threshold *= lerpf(
+				1.0, 2.4,
+				clampf((amp - hills_amp) / maxf(mtn_amp - hills_amp, 1.0), 0.0, 1.0)
+			)
 		var channel: bool = (
 			accumulation[i] >= threshold
 			and lake_id[i] == -1

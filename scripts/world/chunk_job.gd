@@ -19,6 +19,8 @@ var chunk: Vector2i
 var lod: int = 0
 var want_collision: bool = false
 var want_props: bool = false
+## Matches [member Streamer.mesh_epoch] at enqueue; stale remeshes are dropped.
+var mesh_epoch: int = 0
 
 var mesh_data: MeshExtract.MeshData
 var water_data: WaterSurface.WaterData

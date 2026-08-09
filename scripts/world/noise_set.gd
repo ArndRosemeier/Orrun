@@ -36,11 +36,14 @@ static func create(config: WorldConfig) -> NoiseSet:
 
 	built.swell = _make(
 		config.layer_seed("swell"), config.swell_scale,
-		FastNoiseLite.FRACTAL_FBM, 4, 0.52, 2.1
+		FastNoiseLite.FRACTAL_FBM, 3, 0.48, 2.1
 	)
 	built.mountain = _make(
 		config.layer_seed("mountain"), config.mountain_noise_scale,
-		FastNoiseLite.FRACTAL_RIDGED, 5, 0.5, 2.05
+		FastNoiseLite.FRACTAL_RIDGED,
+		clampi(config.mountain_octaves, 1, 6),
+		config.mountain_gain,
+		2.05
 	)
 	built.warp_a = _make(
 		config.layer_seed("warp_a"), config.warp_scale,
@@ -60,10 +63,10 @@ static func create(config: WorldConfig) -> NoiseSet:
 		config.layer_seed("coast"), 340.0, FastNoiseLite.FRACTAL_FBM, 4, 0.55, 2.15
 	)
 	built.relief = _make(
-		config.layer_seed("relief"), 190.0, FastNoiseLite.FRACTAL_RIDGED, 4, 0.55, 2.1
+		config.layer_seed("relief"), 480.0, FastNoiseLite.FRACTAL_RIDGED, 3, 0.45, 2.1
 	)
 	built.relief_fine = _make(
-		config.layer_seed("relief_fine"), 41.0, FastNoiseLite.FRACTAL_FBM, 3, 0.5, 2.0
+		config.layer_seed("relief_fine"), 95.0, FastNoiseLite.FRACTAL_FBM, 2, 0.45, 2.0
 	)
 	built.overhang = _make(
 		config.layer_seed("overhang"), config.overhang_scale,

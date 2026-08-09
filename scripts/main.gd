@@ -21,6 +21,7 @@ const WATER_SHADER: String = "res://shaders/water.gdshader"
 @onready var debug_hud: Control = $UI/DebugHud
 @onready var hydro_map: Control = $UI/HydroMap
 @onready var world_map: Control = $UI/WorldMap
+@onready var terrain_tune: Control = $UI/TerrainTune
 @onready var loading_label: Label = $UI/Loading
 
 var config: WorldConfig
@@ -164,6 +165,7 @@ func _on_world_ready() -> void:
 	world_map.teleport_requested.connect(_teleport_to_map)
 	debug_hud.bind(streamer, sectors, player)
 	debug_hud.visible = true
+	terrain_tune.bind(streamer, config)
 
 	_spawn_pending = true
 	loading_label.text = "Building the ground underfoot..."
@@ -192,6 +194,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		debug_hud.visible = not debug_hud.visible
 	elif event.is_action_pressed("debug_map"):
 		_toggle_world_map()
+	elif event.is_action_pressed("debug_terrain_tune"):
+		_toggle_terrain_tune()
 	elif event.is_action_pressed("debug_epsilon"):
 		set_terrain_debug_view(
 			(int(_terrain_material.get_shader_parameter("debug_view")) + 1) % 4
@@ -202,9 +206,27 @@ func _toggle_world_map() -> void:
 	world_map.visible = not world_map.visible
 	hydro_map.visible = not world_map.visible
 	if world_map.visible:
+		terrain_tune.visible = false
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 		# Size is final next frame; centre on the player then.
 		call_deferred("_focus_world_map_on_player")
+	else:
+		_refresh_mouse_mode()
+
+
+func _toggle_terrain_tune() -> void:
+	terrain_tune.visible = not terrain_tune.visible
+	if terrain_tune.visible:
+		world_map.visible = false
+		hydro_map.visible = true
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	else:
+		_refresh_mouse_mode()
+
+
+func _refresh_mouse_mode() -> void:
+	if world_map.visible or terrain_tune.visible:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	else:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 

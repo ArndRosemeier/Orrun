@@ -6,7 +6,7 @@ extends RefCounted
 
 const SIZE: int = 1000
 const CELL_METRES: float = 1000.0
-const SCHEMA_VERSION: int = 1
+const SCHEMA_VERSION: int = 4
 const SEA_SURFACE_Z: int = 0
 const OCEAN_COLLAR_FULL: int = 48
 const RIVER_ACCUM_THRESHOLD: float = 180.0
@@ -487,6 +487,10 @@ func _build() -> void:
 	land.resize(count)
 
 	_build_landmask_elevation(land, elev_code, humidity, relief)
+	# Continental mountain belts (Alps-scale orogens). Landmask noise alone almost
+	# never reaches mountain codes; these arcs force a readable high spine with
+	# foothills and passes before lakes/rivers solve drainage.
+	_apply_orogens(land, elev_code, humidity, relief)
 	_build_lakes(land, elev_code)
 	_merge_coastal_lakes_into_ocean(land, elev_code)
 	_label_landmasses(land)
@@ -652,6 +656,203 @@ func _build_landmask_elevation(
 
 func _collar_cells() -> int:
 	return maxi(6, OCEAN_COLLAR_FULL * size / SIZE)
+
+
+## Raise land along 1–2 crescent mountain belts. Distances are in atlas cells
+## (1 km). Widths scale with [member size] so a 256 km preview still gets one
+## clear range, and a 1000 km continent gets Alps-like breadth.
+func _apply_orogens(
+	land: PackedByteArray,
+	elev_code: PackedByteArray,
+	humidity: PackedByteArray,
+	relief: PackedByteArray
+) -> void:
+	var count: int = size * size
+	var dist: PackedFloat32Array = PackedFloat32Array()
+	dist.resize(count)
+	var pass_field: PackedFloat32Array = PackedFloat32Array()
+	pass_field.resize(count)
+	for i in count:
+		dist[i] = INF
+		pass_field[i] = 0.0
+
+	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
+	rng.seed = _layer_seed("atlas_orogens")
+	var belt_count: int = 1 if size < 500 else 2
+	for belt in belt_count:
+		_stamp_orogen_arc(dist, pass_field, rng, belt)
+
+	# Narrow high core, tighter foothills — steeper flanks over fewer kilometres.
+	var core_r: float = maxf(6.0, float(size) * 0.024)
+	var near_r: float = maxf(12.0, float(size) * 0.045)
+	var foot_r: float = maxf(22.0, float(size) * 0.085)
+	# Kilometre massifs / valleys / needles. Distance loft alone leaves a flat
+	# plateau; mountains must register as neighbouring atlas cells with large
+	# elevation swings or the 3D world has nothing steep to interpret.
+	var massif_n: FastNoiseLite = _make_noise(
+		"atlas_orogen_massif", 0.085, FastNoiseLite.FRACTAL_RIDGED, 4
+	)
+	var valley_n: FastNoiseLite = _make_noise(
+		"atlas_orogen_valley", 0.05, FastNoiseLite.FRACTAL_FBM, 3
+	)
+	var peak_n: FastNoiseLite = _make_noise(
+		"atlas_orogen_crest", 0.16, FastNoiseLite.FRACTAL_RIDGED, 3
+	)
+
+	for i in count:
+		if land[i] == 0:
+			continue
+		var d: float = dist[i]
+		if d >= foot_r:
+			continue
+		var pass_u: float = clampf(pass_field[i], 0.0, 1.0)
+		# Passes pull the target down toward foothills so rivers can cross.
+		var loft: float = 0.0
+		if d < core_r:
+			loft = lerpf(0.78, 1.0, 1.0 - d / core_r)
+		elif d < near_r:
+			loft = lerpf(
+				0.48, 0.78,
+				1.0 - (d - core_r) / maxf(near_r - core_r, 0.001)
+			)
+		else:
+			loft = lerpf(
+				0.10, 0.48,
+				1.0 - (d - near_r) / maxf(foot_r - near_r, 0.001)
+			)
+
+		loft = lerpf(loft, loft * 0.28, pass_u)
+
+		var cx: float = float(i % size)
+		var cz: float = float(i / size)
+		var massif: float = massif_n.get_noise_2d(cx, cz) * 0.5 + 0.5
+		massif = pow(massif, 1.28)
+		var dissect: float = valley_n.get_noise_2d(cz * 1.15, cx * 0.92)
+		var needle: float = peak_n.get_noise_2d(cx * 1.35, cz * 1.35) * 0.5 + 0.5
+		needle = pow(needle, 1.65)
+
+		# Along-range relief: ridges up, dissected valleys down. Stronger toward
+		# the core so foothills stay coherent for drainage.
+		var belt_w: float = smoothstep(0.08, 0.55, loft)
+		var undulation: float = (massif - 0.48) * 0.50 + dissect * 0.20
+		var loft_h: float = clampf(loft + undulation * belt_w, 0.05, 1.25)
+
+		# Map loft → elevation codes with a wide mountain band so neighbouring
+		# cells can differ by hundreds of metres.
+		var code_f: float = lerpf(118.0, 168.0, clampf(loft_h / 0.45, 0.0, 1.0))
+		if loft_h > 0.45:
+			code_f = lerpf(168.0, 208.0, clampf((loft_h - 0.45) / 0.28, 0.0, 1.0))
+		if loft_h > 0.70:
+			var peak_t: float = (
+				clampf((loft_h - 0.70) / 0.40, 0.0, 1.0) * needle * lerpf(0.55, 1.0, massif)
+			)
+			code_f = lerpf(208.0, 252.0, peak_t)
+
+		# Extra incision where valley noise is low and we are off the massif crest.
+		if loft > 0.35:
+			var incision: float = (
+				(1.0 - massif)
+				* smoothstep(0.10, -0.45, dissect)
+				* lerpf(6.0, 48.0, loft)
+			)
+			code_f -= incision
+
+		var target: int = clampi(int(code_f), 33, 255)
+		if target > int(elev_code[i]):
+			elev_code[i] = target
+
+		var variance: float = absf(undulation) * belt_w + needle * loft
+		var rel_boost: int = clampi(
+			int(
+				lerpf(12.0, 58.0, loft) * (1.0 - pass_u * 0.55)
+				+ variance * 18.0
+			),
+			0, 63
+		)
+		relief[i] = maxi(int(relief[i]), rel_boost)
+		var dry: float = lerpf(1.0, 0.55, loft * (1.0 - pass_u * 0.45))
+		humidity[i] = clampi(int(float(humidity[i]) * dry), 0, 255)
+
+
+func _stamp_orogen_arc(
+	dist: PackedFloat32Array,
+	pass_field: PackedFloat32Array,
+	rng: RandomNumberGenerator,
+	belt: int
+) -> void:
+	var collar: float = float(_collar_cells()) + 4.0
+	var cx: float = lerpf(float(size) * 0.38, float(size) * 0.62, rng.randf())
+	var cz: float = lerpf(float(size) * 0.38, float(size) * 0.62, rng.randf())
+	# Second belt offsets so belts don't sit on top of each other.
+	if belt > 0:
+		cx = clampf(cx + float(size) * lerpf(-0.18, 0.18, rng.randf()), collar, float(size) - collar)
+		cz = clampf(cz + float(size) * lerpf(-0.18, 0.18, rng.randf()), collar, float(size) - collar)
+	var radius: float = float(size) * lerpf(0.32, 0.44, rng.randf())
+	var angle0: float = rng.randf() * TAU
+	var span: float = lerpf(PI * 0.70, PI * 1.05, rng.randf())
+	var steps: int = maxi(32, int(radius * span * 1.15))
+	var foot_r: float = maxf(22.0, float(size) * 0.085)
+	var pass_n: FastNoiseLite = _make_noise(
+		"atlas_orogen_pass_%d" % belt, 0.11, FastNoiseLite.FRACTAL_FBM, 2
+	)
+	var warp_n: FastNoiseLite = _make_noise(
+		"atlas_orogen_warp_%d" % belt, 0.03, FastNoiseLite.FRACTAL_FBM, 3
+	)
+
+	var prev: Vector2 = Vector2.INF
+	for s in range(steps + 1):
+		var u: float = float(s) / float(steps)
+		var ang: float = angle0 + span * u
+		var rad: float = radius * (
+			1.0 + warp_n.get_noise_2d(ang * 3.0, float(belt) * 7.0) * 0.08
+		)
+		var px: float = cx + cos(ang) * rad
+		var pz: float = cz + sin(ang) * rad
+		px = clampf(px, collar, float(size) - 1.0 - collar)
+		pz = clampf(pz, collar, float(size) - 1.0 - collar)
+		var p: Vector2 = Vector2(px, pz)
+		# Sparse high passes along the crest (not a solid wall).
+		var pass_amt: float = 0.0
+		var pn: float = pass_n.get_noise_2d(u * 40.0, float(belt) * 11.0)
+		if pn > 0.28:
+			pass_amt = smoothstep(0.28, 0.72, pn)
+		if prev != Vector2.INF:
+			_stamp_orogen_segment(dist, pass_field, prev, p, foot_r, pass_amt)
+		prev = p
+
+
+func _stamp_orogen_segment(
+	dist: PackedFloat32Array,
+	pass_field: PackedFloat32Array,
+	a: Vector2,
+	b: Vector2,
+	foot_r: float,
+	pass_amt: float
+) -> void:
+	var pad: float = foot_r + 2.0
+	var min_x: int = clampi(floori(minf(a.x, b.x) - pad), 0, size - 1)
+	var max_x: int = clampi(ceili(maxf(a.x, b.x) + pad), 0, size - 1)
+	var min_z: int = clampi(floori(minf(a.y, b.y) - pad), 0, size - 1)
+	var max_z: int = clampi(ceili(maxf(a.y, b.y) + pad), 0, size - 1)
+	var ab: Vector2 = b - a
+	var ab_len_sq: float = ab.length_squared()
+	for az in range(min_z, max_z + 1):
+		for ax in range(min_x, max_x + 1):
+			var p: Vector2 = Vector2(float(ax) + 0.5, float(az) + 0.5)
+			var t: float = 0.0
+			if ab_len_sq > 0.0001:
+				t = clampf((p - a).dot(ab) / ab_len_sq, 0.0, 1.0)
+			var closest: Vector2 = a + ab * t
+			var d: float = p.distance_to(closest)
+			if d > foot_r + 1.0:
+				continue
+			var idx: int = index_of(ax, az)
+			if d < dist[idx]:
+				dist[idx] = d
+			if pass_amt > 0.0:
+				# Pass influence is strongest on the crest and fades with distance.
+				var crest_w: float = 1.0 - clampf(d / maxf(foot_r * 0.45, 1.0), 0.0, 1.0)
+				pass_field[idx] = maxf(pass_field[idx], pass_amt * crest_w)
 
 
 func _lake_max_cells() -> int:

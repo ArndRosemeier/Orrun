@@ -159,6 +159,10 @@ func fill_window(
 			"trunk_bank_rise": config.trunk_bank_rise,
 			"swell_height": config.swell_height,
 			"mountain_detail": config.mountain_detail,
+			"mountain_octaves": config.mountain_octaves,
+			"mountain_gain": config.mountain_gain,
+			"mountain_sharpness": config.mountain_sharpness,
+			"mountain_macro_contrast": config.mountain_macro_contrast,
 			"warp_strength": config.warp_strength,
 			"ocean_floor_margin": config.ocean_floor_margin,
 			"inland_freeboard": config.inland_freeboard,
@@ -261,8 +265,8 @@ func _base_height(world_x: float, world_z: float) -> float:
 	var px: float = world_x + warp_x
 	var pz: float = world_z + warp_z
 
-	var base: float = fields.sample_smooth(fields.elevation_m, world_x, world_z)
 	var relief: float = fields.sample_smooth(fields.relief01, world_x, world_z)
+	var base: float = _atlas_base_steepened(world_x, world_z, relief)
 	var wet: float = clampf(fields.sample_smooth(fields.water_flag, world_x, world_z), 0.0, 1.0)
 	# The sea bed keeps a little detail so it is not a plate, but not enough to
 	# rise through the shelf and invent islands the atlas never placed.
@@ -273,9 +277,30 @@ func _base_height(world_x: float, world_z: float) -> float:
 		* lerpf(1.0, 0.4, relief)
 	)
 	var ridge01: float = noise.mountain.get_noise_2d(px * 0.9, pz * 0.9) * 0.5 + 0.5
-	var ridge: float = (ridge01 - 0.4) * config.mountain_detail * relief * relief
+	var shaped: float = pow(clampf(ridge01, 0.0, 1.0), maxf(config.mountain_sharpness, 0.5))
+	# Linear relief (not squared): squared made Peak height feel broken in alpine.
+	var ridge: float = (shaped - 0.35) * config.mountain_detail * lerpf(0.35, 1.0, relief)
 
 	return base + (swell + ridge) * dryness
+
+
+## Amplifies atlas elevation against a local neighbourhood so orogen flanks
+## get real slope. Without this, Peak height only adds gentle rolls on a
+## kilometre-smooth loft — which is what shallow distant hills look like.
+func _atlas_base_steepened(world_x: float, world_z: float, relief: float) -> float:
+	var e0: float = fields.sample_smooth(fields.elevation_m, world_x, world_z)
+	var contrast: float = config.mountain_macro_contrast
+	if contrast <= 1.001 or relief < 0.04:
+		return e0
+	var r: float = 1400.0
+	var e_avg: float = (
+		fields.sample_smooth(fields.elevation_m, world_x - r, world_z)
+		+ fields.sample_smooth(fields.elevation_m, world_x + r, world_z)
+		+ fields.sample_smooth(fields.elevation_m, world_x, world_z - r)
+		+ fields.sample_smooth(fields.elevation_m, world_x, world_z + r)
+	) * 0.25
+	var amount: float = lerpf(1.0, contrast, clampf(relief, 0.0, 1.0))
+	return e_avg + (e0 - e_avg) * amount
 
 
 ## Pulls the land down into a valley along every atlas trunk it is near.
@@ -309,13 +334,19 @@ func _carve_valleys(
 		var d: float = sqrt((world_x - px) * (world_x - px) + (world_z - pz) * (world_z - pz))
 		if d >= radius:
 			continue
-		# Atlas water is a kilometre-scale hint. When detail has already put the
-		# land below it, carving toward a floor above the land does nothing
-		# useful and the hydrology must drape instead; clamp so the target is
-		# never above the uncarved surface.
-		var floor_z: float = minf(
-			ay + (by - ay) * t + config.trunk_bank_rise, height
+		# Atlas water is a kilometre-scale hint. Detail (ridge × relief²) can
+		# dam a valley that only digs trunk_bank_rise metres — common on orogen
+		# flanks — so require a gutter deep enough to beat that amplitude.
+		var relief01: float = fields.sample_smooth(fields.relief01, world_x, world_z)
+		var detail_amp: float = (
+			config.mountain_detail * lerpf(0.35, 1.0, relief01) * 0.65
+			+ config.swell_height * lerpf(1.0, 0.4, relief01) * 0.35
+			+ maxf(config.mountain_macro_contrast - 1.0, 0.0) * 40.0 * relief01
 		)
+		var min_gutter: float = config.trunk_bank_rise + detail_amp
+		var atlas_floor: float = ay + (by - ay) * t + config.trunk_bank_rise
+		var floor_z: float = minf(atlas_floor, height - min_gutter)
+		floor_z = minf(floor_z, height)
 		var ramp: float = smoothstep(0.0, radius, d)
 		out = minf(out, lerpf(floor_z, height, ramp))
 	return out

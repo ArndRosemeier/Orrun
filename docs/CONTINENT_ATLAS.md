@@ -125,8 +125,17 @@ One function, used by atlas preview, FarTerrain, and MacroTerrain bias:
 | 181–220 | Mountains |
 | 221–255 | High peaks |
 
-Exact metres = linear map within bands (implementation defines one
-`atlas_elevation_to_metres(code)`; tests lock the endpoints).
+Metres are **not** linear across the whole 0–255 range. Sea (0–32) and
+coast (33–40) stay linear so shores keep fine resolution. Land codes 41–255
+use an **exponential decode** (`AtlasPack.elevation_to_metres`): low codes stay
+in walkable plains/hills, high codes reach Alps-scale peaks (~4 km at 255).
+Tests lock the endpoints and round-trips. Schema version bumps when this curve
+changes.
+
+**Orogens:** after the climate landmask, the generator stamps 1–2 crescent
+mountain belts (length/width scaled to atlas size) with a high core, foothill
+apron, and sparse passes so rivers can cross. Noise alone does not produce
+Alps-like ranges.
 
 ### 4.4 Biome ids (v1 set)
 

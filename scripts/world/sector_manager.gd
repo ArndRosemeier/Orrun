@@ -26,6 +26,9 @@ var stat_generated: int = 0
 var stat_evicted: int = 0
 var stat_last_bake_ms: int = 0
 var last_bake_timings: Dictionary = {}
+## Bumped by [method invalidate_around] so in-flight sector jobs from an older
+## interpretation are never published.
+var bake_epoch: int = 0
 
 
 func _init(world_context: WorldContext) -> void:
@@ -42,6 +45,8 @@ func pump() -> void:
 		var sector_job: SectorJob = job
 		var key: int = WorldCoords.sector_key(sector_job.sector)
 		_pending.erase(key)
+		if sector_job.bake_epoch != bake_epoch:
+			continue
 		_publish(key, sector_job.result)
 
 
@@ -100,9 +105,22 @@ func request(sector_coord: Vector2i, priority: float = 0.0) -> void:
 	job.context = context
 	job.sector = sector_coord
 	job.priority = priority
+	job.bake_epoch = bake_epoch
 	_pending[key] = true
 	_queue.enqueue(job)
 	_queue.sort_waiting()
+
+
+## Drops cached sectors and requeues around [param centre]. Used when
+## interpretation knobs on the shared [WorldConfig] change: the atlas stays,
+## but macro elevation / hydro must be rebuilt from the new params.
+func invalidate_around(centre: Vector2i) -> void:
+	bake_epoch += 1
+	_ready.clear()
+	_lru.clear()
+	_queue.drop_waiting(func(_job: GenQueue.Job) -> bool: return true)
+	_pending.clear()
+	request_around(centre)
 
 
 func pending_count() -> int:

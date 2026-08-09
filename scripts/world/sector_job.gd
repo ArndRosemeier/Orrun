@@ -10,6 +10,9 @@ extends GenQueue.Job
 var context: WorldContext
 var sector: Vector2i
 var result: WorldSector
+## Matches [member SectorManager.bake_epoch] at enqueue time. Stale results
+## from a tuning rebake are discarded on publish.
+var bake_epoch: int = 0
 
 
 func run() -> void:

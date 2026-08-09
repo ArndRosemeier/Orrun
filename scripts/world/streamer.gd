@@ -66,6 +66,9 @@ var stat_chunks_waiting_on_sector: int = 0
 ## Queued chunks abandoned because the ring moved off them before a worker
 ## picked them up.
 var stat_chunks_cancelled: int = 0
+## Bumped by [method rebake_interpretation] so chunk/far jobs from an older
+## config never install.
+var mesh_epoch: int = 0
 
 
 func setup(
@@ -153,6 +156,7 @@ func _maybe_refresh_far(at: Vector2) -> void:
 	var job: FarTerrainJob = FarTerrainJob.new()
 	job.context = context
 	job.centre = at
+	job.mesh_epoch = mesh_epoch
 	# Behind every chunk: the backdrop can wait, the ground cannot.
 	job.priority = 10000.0
 	_far_pending = true
@@ -230,6 +234,7 @@ func _queue_chunk(chunk: Vector2i, lod: int, priority: float) -> bool:
 	job.want_collision = lod == 0
 	job.want_props = lod == 0
 	job.priority = priority
+	job.mesh_epoch = mesh_epoch
 	_pending_chunks[key] = true
 	_queue.enqueue(job)
 	return true
@@ -305,9 +310,15 @@ func _collect() -> void:
 		if job is FarTerrainJob:
 			var far_job: FarTerrainJob = job
 			_far_pending = false
+			if far_job.mesh_epoch != mesh_epoch:
+				continue
 			_far_terrain.apply(far_job.result)
 			continue
-		_ready_results.append(job as ChunkJob)
+		var chunk_job: ChunkJob = job as ChunkJob
+		if chunk_job.mesh_epoch != mesh_epoch:
+			_pending_chunks.erase(WorldCoords.chunk_key(chunk_job.chunk))
+			continue
+		_ready_results.append(chunk_job)
 
 
 func _instantiate_budgeted() -> void:
@@ -366,6 +377,36 @@ func queue_depth() -> int:
 
 func region_count() -> int:
 	return _regions.size()
+
+
+## Drops live meshes and requeues sector bakes so interpretation knobs on the
+## shared [WorldConfig] take effect around the player. Atlas is untouched.
+func rebake_interpretation() -> void:
+	if sectors == null or _player == null:
+		return
+	mesh_epoch += 1
+	var world_pos: Vector3 = WorldOrigin.to_world(_player.global_position)
+	var sector: Vector2i = WorldCoords.sector_of(world_pos.x, world_pos.z)
+	sectors.invalidate_around(sector)
+
+	for key in _chunks.keys():
+		var node: ChunkNode = _chunks[key]
+		node.queue_free()
+	_chunks.clear()
+	_pending_chunks.clear()
+	_ready_results.clear()
+	_regions.clear()
+	_queue.drop_waiting(
+		func(job: GenQueue.Job) -> bool:
+			return job is ChunkJob or job is FarTerrainJob
+	)
+	_far_pending = false
+	if _far_terrain != null:
+		_far_terrain.clear()
+	_last_sector = Vector2i(2147483647, 2147483647)
+	_last_center = Vector2i(2147483647, 2147483647)
+	stat_chunks_live = 0
+	stat_chunks_waiting_on_sector = 0
 
 
 func shutdown() -> void:

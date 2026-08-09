@@ -303,7 +303,7 @@ static func _build_columns(
 			var nearest_feature: float = minf(nearest_wet, road_edge_d)
 			var mask: float = smoothstep(cfg.corridor_inner, cfg.corridor_outer, nearest_feature)
 
-			var relief: float = _relief_value(noise, wx, wz)
+			var relief: float = _relief_value(noise, wx, wz, amp, cfg.relief_amp_mountains)
 			var surface: float = height + relief * amp * mask
 
 			# --- carve: river bed and banks ---------------------------------------
@@ -482,10 +482,17 @@ static func _damp_overhangs_on_steep_ground(
 			field.overhang_amp[index] *= 1.0 - 0.9 * smoothstep(1.1, 2.1, slope)
 
 
-static func _relief_value(noise: NoiseSet, wx: float, wz: float) -> float:
+static func _relief_value(
+	noise: NoiseSet, wx: float, wz: float, amp: float, mountain_amp: float
+) -> float:
 	var ridge: float = noise.relief.get_noise_2d(wx, wz)
 	var fine: float = noise.relief_fine.get_noise_2d(wx, wz)
-	return ridge * 0.78 + fine * 0.22
+	# High-amp columns already carry continental ridges; fine freckles read as
+	# micro-mountains from the air, so fade them out toward mountain amp.
+	var fine_w: float = lerpf(
+		0.08, 0.02, clampf(amp / maxf(mountain_amp, 1.0), 0.0, 1.0)
+	)
+	return ridge * (1.0 - fine_w) + fine * fine_w
 
 
 static func _segment_param(

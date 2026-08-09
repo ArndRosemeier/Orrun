@@ -52,13 +52,24 @@ extends Resource
 ## wavelength in metres. This is the difference between plains that drain and
 ## plains that flood, and between a landscape and a tablecloth.
 @export var swell_height: float = 22.0
-@export var swell_scale: float = 620.0
+@export var swell_scale: float = 1100.0
 ## Ridge detail, scaled by how mountainous the atlas says the cell is.
-@export var mountain_detail: float = 90.0
-@export var mountain_noise_scale: float = 1400.0
+## Amp (m) sets face height; noise_scale is peak spacing (lower = denser peaks).
+@export var mountain_detail: float = 180.0
+@export var mountain_noise_scale: float = 1600.0
+## Ridged-fractal layers on the mountain field. More layers = secondary peaks
+## between the fundamentals (without only shrinking spacing).
+@export var mountain_octaves: int = 3
+@export var mountain_gain: float = 0.42
+## Power on ridge noise (>1 = thinner, steeper peaks). 1 = raw ridged field.
+@export var mountain_sharpness: float = 1.55
+## Steepens atlas elevation against a ~1.4 km neighbourhood in high-relief
+## cells. This is what makes kilometre flanks look alpine; ridge amp alone
+## cannot, because the atlas loft is smooth at 1 km.
+@export var mountain_macro_contrast: float = 2.6
 ## Domain warp applied before the detail noise, so refinement does not line up
 ## with the atlas lattice and betray the 1 km grid.
-@export var warp_strength: float = 260.0
+@export var warp_strength: float = 160.0
 @export var warp_scale: float = 900.0
 
 ## Metres of freedom the shoreline detail has inside a coastal atlas cell. The
@@ -78,9 +89,10 @@ extends Resource
 @export var trunk_bank_rise: float = 2.2
 
 ## Relief amplitude (metres of 3D detail allowed on top of the macro surface).
+## Mountains stay modest here — steepness lives in continental ridges, not mesh popcorn.
 @export var relief_amp_plains: float = 3.0
 @export var relief_amp_hills: float = 14.0
-@export var relief_amp_mountains: float = 46.0
+@export var relief_amp_mountains: float = 28.0
 
 # --- Hydrology ------------------------------------------------------------------
 
@@ -154,7 +166,8 @@ extends Resource
 
 ## Vertical clamps for the whole world.
 @export var world_floor: float = -260.0
-@export var world_ceiling: float = 1400.0
+## Above atlas peak decode ([member AtlasPack.PEAK_MAX_M]) plus relief/detail headroom.
+@export var world_ceiling: float = 4800.0
 ## Extra metres meshed above/below the sampled column extremes.
 @export var vertical_margin: float = 14.0
 
@@ -252,6 +265,8 @@ func content_hash() -> int:
 		local_keepout_metres,
 		float(atlas_size), float(sector_contract_version),
 		swell_height, swell_scale, mountain_detail, mountain_noise_scale,
+		float(mountain_octaves), mountain_gain,
+		mountain_sharpness, mountain_macro_contrast,
 		warp_strength, warp_scale,
 		coast_detail, ocean_floor_margin, inland_freeboard,
 		trunk_valley_radius, trunk_valley_per_class, trunk_bank_rise,
