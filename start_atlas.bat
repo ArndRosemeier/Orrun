@@ -1,12 +1,13 @@
 @echo off
-REM Orrun - procedural fantasy wilderness.
-REM WASD move, mouse look, Space jump, Shift sprint, F toggle fly,
-REM H debug HUD, M hydro map, 1-3 terrain debug views, Esc release mouse.
+REM Orrun continent atlas 2D viewer.
+REM Drag to pan, wheel to zoom (deep zoom supported), right-click cycles views.
+REM Zoom until cells are ~56+ px wide to see per-cell field overlays.
+REM
+REM Optional: start_atlas.bat -- --seed=42 --size=256
+REM Full production atlas: start_atlas.bat -- --size=1000
 
 setlocal
 cd /d "%~dp0"
-REM %~dp0 ends with \, which escapes the closing quote in "--path "%~dp0"".
-REM %CD% after the cd above does not, so the path stays well-formed.
 set "ROOT=%CD%"
 
 set "GODOT="
@@ -18,19 +19,11 @@ if not defined GODOT if exist "C:\Projekte\InfiniWorld\tools\godot\Godot_v4.6-st
 
 if not defined GODOT (
     echo ERROR: Godot 4.6 not found.
-    echo Put the editor at tools\godot\Godot_v4.6-voxel_win64.exe
-    echo or set ORRUN_GODOT to the full path of the executable.
     pause
     exit /b 1
 )
 
-if not exist "%ROOT%\project.godot" (
-    echo ERROR: project.godot not found next to start.bat.
-    pause
-    exit /b 1
-)
-
-echo Starting Orrun with:
+echo Starting atlas viewer with:
 echo   %GODOT%
-"%GODOT%" --path "%ROOT%" %*
+"%GODOT%" --path "%ROOT%" res://scenes/atlas_viewer.tscn %*
 endlocal

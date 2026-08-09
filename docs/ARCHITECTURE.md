@@ -11,9 +11,16 @@ really one layer overwriting a decision an earlier layer had already made.
 
 ## Layer order
 
+Continental structure above the playable window is specified in
+[`CONTINENT_ATLAS.md`](CONTINENT_ATLAS.md) and implemented under `scripts/atlas/`
+(`ContinentAtlas`, interactive viewer via `start_atlas.bat`). The wilderness bake
+below is still the walkable window; wiring the window to the atlas is a later
+phase.
+
 | # | Layer | Code | Scope | Built |
 |---|-------|------|-------|-------|
 | 0 | Config and noise | `WorldConfig`, `NoiseSet` | whole world | at boot |
+| 0b | Continent atlas | `ContinentAtlas` | 1000×1000 km (1 km cells) | on demand / viewer |
 | 1 | Macro terrain | `MacroTerrain` | 384x384 cells of 32 m | once, on a worker |
 | 2 | Hydrology | `Hydrology` | same grid | once, on a worker |
 | 3 | Claims | `ClaimMask` | world space | once, on a worker |
