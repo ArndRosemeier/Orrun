@@ -96,8 +96,11 @@ extends Resource
 ## flooded. Both neighbours reject it identically, so no seam appears.
 @export var lake_max_cells: int = 2600
 ## Channel half-width in metres for Strahler order 1, and growth per order.
-@export var river_width_base: float = 1.6
-@export var river_width_per_order: float = 2.3
+## Must stay wider than the LOD0 voxel (2 m), or density samples miss the
+## channel: the bed never opens, surface_z sits on the waterline, and the water
+## mesh drops those columns as dry - the river blinks out under its own banks.
+@export var river_width_base: float = 3.6
+@export var river_width_per_order: float = 2.8
 ## Bed depth below the water surface for order 1, and growth per order.
 @export var river_depth_base: float = 1.4
 @export var river_depth_per_order: float = 0.9
@@ -131,9 +134,12 @@ extends Resource
 @export var corridor_inner: float = 6.0
 ## ...and fully restored beyond this distance (m).
 @export var corridor_outer: float = 70.0
-## Hard tolerance used by the contract test: surface must stay this close (m)
-## to the drainage height directly over a channel.
-@export var corridor_epsilon: float = 1.25
+## Hard tolerance on the water-bed contract: every wet column's finished ground
+## must sit at least [constant DensityField.MIN_VISIBLE_WATER_CLEARANCE] below
+## its water sheet. This is the allowed deficit above that floor (metres) —
+## effectively zero. A looser value used to hide flush beds that the water mesh
+## then culled as dry.
+@export var corridor_epsilon: float = 0.001
 
 # --- Chunks / meshing --------------------------------------------------------------
 

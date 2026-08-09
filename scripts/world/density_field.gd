@@ -16,6 +16,23 @@ extends RefCounted
 const TILE_DIVISIONS: int = 4
 ## Metres the ground stands above the water at the lip of a channel.
 const BANK_RISE: float = 1.1
+## Metres the water sheet sits below the continental bed under the channel.
+## Zero leaves water_top == the land rim: the sheet z-fights the mesh and
+## WaterSurface culls columns whose surface comes within WET_EPSILON of the
+## waterline, which reads as the river diving underground in patches.
+const WATER_FREEBOARD: float = 0.45
+## How far below the local continental bed a draped polyline chord may pull the
+## sheet. Deeper than this and the density field would cut a slot canyon that
+## coarse LODs bridge with ground, hiding the river again.
+const MAX_CHORD_BURY: float = 1.6
+## Hard floor on how deep a river bed is cut below the water sheet, even at the
+## banks and on fords. Must stay above [constant MIN_VISIBLE_WATER_CLEARANCE].
+const MIN_BED_CLEARANCE: float = 0.12
+## Metres the bed must sit below [member Field.water_top] for WaterSurface to
+## emit the column. The draw path and the contract use the same number: a bed
+## flush with the sheet used to score a perfect contract error of 0 while the
+## mesh culled the water as dry.
+const MIN_VISIBLE_WATER_CLEARANCE: float = 0.02
 const SOLID: float = 1e6
 const AIR: float = -1e6
 ## Deep rock is stored as [constant SOLID] so the volume pass can skip it, but a
@@ -52,14 +69,21 @@ class Field extends RefCounted:
 	var ground_color: PackedColorArray = PackedColorArray()
 	## Metres of 3D overhang deviation allowed in this column (already masked).
 	var overhang_amp: PackedFloat32Array = PackedFloat32Array()
-	## Metres the finished ground pokes above a water surface it should sit
-	## below. Should be ~0 everywhere; the contract test reads this.
+	## Clearance deficit per wet column: how far [member surface_z] sits above
+	## [code]water_top - MIN_VISIBLE_WATER_CLEARANCE[/code]. Zero means the bed
+	## is strictly below the sheet by enough for the water mesh to draw.
 	var contract_error: PackedFloat32Array = PackedFloat32Array()
 	## Highest water surface touching each column, or -INF when dry.
 	var water_top: PackedFloat32Array = PackedFloat32Array()
 
 	var has_water: bool = false
 	var max_contract_error: float = 0.0
+	## Smallest [code]water_top - surface_z[/code] over wet columns, or INF when
+	## the chunk is dry. Negative means the bed pokes through the sheet.
+	var min_water_clearance: float = INF
+	## Wet columns whose bed is not strictly below the sheet.
+	var wet_columns_failing_clearance: int = 0
+	var wet_columns: int = 0
 
 	func sample_index(ix: int, iy: int, iz: int) -> int:
 		return (iz * dims.y + iy) * dims.x + ix
@@ -144,6 +168,11 @@ static func _build_columns(
 	bridge_gaps: PackedVector4Array
 ) -> void:
 	var count: int = samples_h * samples_h
+	field.has_water = false
+	field.max_contract_error = 0.0
+	field.min_water_clearance = INF
+	field.wet_columns_failing_clearance = 0
+	field.wet_columns = 0
 	field.surface_z = PackedFloat32Array()
 	field.surface_z.resize(count)
 	field.corridor_mask = PackedFloat32Array()
@@ -239,15 +268,23 @@ static func _build_columns(
 				road_edge_d = d - road_half
 
 			# --- local lake --------------------------------------------------------
-			# A column is under a lake when the smooth drainage surface is above
-			# the smooth land surface. Both fields are sampled the same way, so
-			# the two meet on a curve rather than on a macro cell boundary, and
-			# the water level itself stays the basin's flat spill height.
+			# A column is under a lake when the land itself sits below the lake's
+			# spill height and the drainage surface is above the land (standing
+			# water). The old test omitted "land below the spill": any column
+			# within two macro cells of a lake whose filled drainage sat a few
+			# centimetres above the land - interpolation noise, usually - was
+			# carved down to the lake bed and painted with that lower sheet.
+			# Next to a higher trunk that reads as the river diving underground
+			# into a stepped hole.
 			var lake_edge_d: float = hydro.lake_distance_at(wx, wz)
 			var lake_surface: float = -INF
 			if lake_edge_d <= cfg.macro_cell_size * 2.0:
 				var flat: float = hydro.lake_surface_near_at(wx, wz)
-				if flat > -INF and hydro.drainage_at(wx, wz) > height:
+				if (
+					flat > -INF
+					and height < flat
+					and hydro.drainage_at(wx, wz) > height
+				):
 					lake_surface = flat
 
 			# --- ocean and atlas lakes -----------------------------------------------
@@ -277,15 +314,32 @@ static func _build_columns(
 			var submerged_z: float = -INF
 			if river_d < river_half + river_valley:
 				var depth: float = river_depth * _ford_relief(fords, wx, wz)
+				# Sheet height from the draped polyline:
+				#   - never above the local continental bed (no floating canal)
+				#   - never far below it (no slot canyon that LOD bridges shut)
+				#   - then a fixed freeboard so the sheet is not flush with the rim
+				# Using the polyline (not per-column height) keeps the sheet
+				# level across the channel instead of climbing every bank.
+				var draped: float = minf(river_water_z, height)
+				draped = maxf(draped, height - MAX_CHORD_BURY)
+				var channel_water: float = draped - WATER_FREEBOARD
 				if river_d <= river_half:
 					var across: float = river_d / maxf(river_half, 0.001)
-					var bed: float = river_water_z - depth * sqrt(maxf(1.0 - across * across, 0.0))
+					# Elliptical bed, but never pinch to zero at the banks. A bed
+					# that meets the waterline leaves surface_z == water_top and
+					# the water mesh drops the column as dry, which reads as the
+					# ground creeping over the river.
+					var profile: float = sqrt(maxf(1.0 - across * across, 0.0))
+					profile = maxf(profile, 0.4)
+					var bed: float = (
+						channel_water - maxf(depth * profile, MIN_BED_CLEARANCE)
+					)
 					surface = minf(surface, bed)
-					submerged_z = river_water_z
+					submerged_z = channel_water
 					# Only the channel carries water. Claiming the whole valley
 					# would paint the river's level across every lower thing in
 					# it, including the lake it is about to join.
-					water_top = river_water_z
+					water_top = channel_water
 				else:
 					var ramp: float = smoothstep(
 						0.0, river_valley, river_d - river_half
@@ -295,7 +349,7 @@ static func _build_columns(
 					# ground within centimetres of the surface, which floods as
 					# a shallow pan and reads as foam rather than as a river.
 					surface = minf(
-						surface, lerpf(river_water_z + BANK_RISE, surface, ramp)
+						surface, lerpf(channel_water + BANK_RISE, surface, ramp)
 					)
 				wet = 1.0 - smoothstep(0.0, river_half + 12.0, river_d)
 
@@ -309,7 +363,9 @@ static func _build_columns(
 				# The bed is the macro basin itself, only nudged below the water
 				# line. Flattening it to a fixed depth would turn every lake into
 				# a shallow tray and every shore into a step.
-				surface = minf(surface, minf(height, lake_surface) - 0.05)
+				surface = minf(
+					surface, minf(height, lake_surface) - MIN_BED_CLEARANCE
+				)
 				water_top = maxf(water_top, lake_surface)
 				submerged_z = maxf(submerged_z, lake_surface)
 				wet = maxf(wet, smoothstep(0.0, 2.5, lake_surface - height))
@@ -319,7 +375,9 @@ static func _build_columns(
 			# signed shoreline says so; this only stops relief detail poking a
 			# 3 m rock through an otherwise flat sea.
 			if atlas_surface > -INF:
-				surface = minf(surface, minf(height, atlas_surface) - 0.05)
+				surface = minf(
+					surface, minf(height, atlas_surface) - MIN_BED_CLEARANCE
+				)
 				water_top = maxf(water_top, atlas_surface)
 				submerged_z = maxf(submerged_z, atlas_surface)
 				wet = maxf(wet, smoothstep(0.0, 2.5, atlas_surface - height))
@@ -353,7 +411,20 @@ static func _build_columns(
 			var error: float = 0.0
 			if water_top > -INF:
 				field.has_water = true
-			if submerged_z > -INF:
+				field.wet_columns += 1
+				# Same predicate WaterSurface uses to decide whether a column is
+				# wet. Measuring against submerged_z alone used to call a flush
+				# bed (surface == water) a pass, while the mesh dropped it.
+				var clearance: float = water_top - surface
+				field.min_water_clearance = minf(field.min_water_clearance, clearance)
+				var need: float = water_top - MIN_VISIBLE_WATER_CLEARANCE
+				error = maxf(surface - need, 0.0)
+				if clearance < MIN_VISIBLE_WATER_CLEARANCE:
+					field.wet_columns_failing_clearance += 1
+				worst_error = maxf(worst_error, error)
+			elif submerged_z > -INF:
+				# Bank / approach columns that must stay below a nearby water
+				# plane without carrying a sheet of their own.
 				error = maxf(surface - submerged_z, 0.0)
 				worst_error = maxf(worst_error, error)
 

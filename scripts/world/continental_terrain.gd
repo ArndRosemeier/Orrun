@@ -251,7 +251,13 @@ func _carve_valleys(
 		var d: float = sqrt((world_x - px) * (world_x - px) + (world_z - pz) * (world_z - pz))
 		if d >= radius:
 			continue
-		var floor_z: float = ay + (by - ay) * t + config.trunk_bank_rise
+		# Atlas water is a kilometre-scale hint. When detail has already put the
+		# land below it, carving toward a floor above the land does nothing
+		# useful and the hydrology must drape instead; clamp so the target is
+		# never above the uncarved surface.
+		var floor_z: float = minf(
+			ay + (by - ay) * t + config.trunk_bank_rise, height
+		)
 		var ramp: float = smoothstep(0.0, radius, d)
 		out = minf(out, lerpf(floor_z, height, ramp))
 	return out

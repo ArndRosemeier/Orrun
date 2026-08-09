@@ -12,7 +12,9 @@ uniform float depth_fade = 2.2;
 // every gently shelving lake margin into a white pan.
 uniform float foam_width = 0.28;
 // Metres of depth over which the sheet fades in from nothing at the shore.
-uniform float shore_fade = 0.9;
+// Kept below typical channel depth so a ford still softens, but a normal bed
+// (a metre or more) stays fully opaque.
+uniform float shore_fade = 0.35;
 uniform float ripple_scale = 1.4;
 uniform float ripple_speed = 0.35;
 uniform float flow_speed = 0.55;
@@ -42,13 +44,18 @@ void vertex() {
 }
 
 void fragment() {
-	// Scene depth behind the water surface, in view space.
+	// Bed clearance authored into UV.y by WaterSurface. Scene depth is only a
+	// fallback: LOD skirts, bank triangles and chunk seams routinely put opaque
+	// geometry near the sheet in the depth buffer, which made water_depth go to
+	// zero and whole stretches of river vanish while the trench stayed green.
+	float authored_depth = UV.y;
 	float raw = texture(depth_buffer, SCREEN_UV).x;
 	vec4 view = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, raw, 1.0);
 	view.xyz /= view.w;
 	float floor_distance = -view.z;
 	float surface_distance = -VERTEX.z;
-	float water_depth = max(floor_distance - surface_distance, 0.0);
+	float scene_depth = max(floor_distance - surface_distance, 0.0);
+	float water_depth = max(authored_depth, scene_depth);
 
 	float t = TIME;
 	vec2 drift = vec2(0.0, t * flow_speed);

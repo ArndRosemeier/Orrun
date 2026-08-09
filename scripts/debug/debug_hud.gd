@@ -79,7 +79,7 @@ func _process(_delta: float) -> void:
 			info["claim"] if String(info["claim"]) != "" else "none"
 		])
 
-	lines.append("last chunk %d ms   worst ground-above-water %.3f m" % [
+	lines.append("last chunk %d ms   worst water-bed deficit %.3f m" % [
 		streamer.stat_last_build_ms, streamer.stat_worst_contract_error
 	])
 	lines.append("F1 hud   F2 map   F3 corridor mask   V fly   Esc mouse")

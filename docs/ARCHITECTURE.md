@@ -54,10 +54,13 @@ eight seconds, and produce the `WorldSector` every chunk job reads. Layers 5-7
 are pure functions of a sector plus a chunk coordinate. Only layer 8 touches the
 SceneTree.
 
-`FarTerrain` sits outside this pipeline: a moving 128 m patch around the player,
+`FarTerrain` sits outside this pipeline: a moving coarse patch around the player,
 sampled from `ContinentalTerrain` directly rather than from any sector, so the
-horizon exists in ground nobody has baked. Nothing collides with it, and it is
-sunk three metres so a streamed chunk always wins where the two overlap.
+horizon exists in ground nobody has baked. Under the streamed Chebyshev ring the
+plate is dropped to `world_floor` so a carved river trench cannot reveal it above
+the bed; outside the ring it is sunk a few metres and atlas trunks get a dent
+plus a distant-water tint so a ~256 m quad cannot chord across a valley as a
+green land bridge.
 
 ## The contracts
 
@@ -159,12 +162,15 @@ nearest channel, shore or road)`. It is zero on the water and one out in open
 country. Because 3D detail is multiplied by it, no amount of relief noise can
 lift the ground through a river or drop it out from under a road.
 
-`Field.contract_error` records, per column, how far the finished ground pokes
-above a water surface it should sit below. The test `drainage-surface contract
-holds` fails if any sampled column exceeds `corridor_epsilon` (1.25 m). It is
-currently 0.000 m. This is the single most important invariant in the project:
-if it drifts, rivers start floating over the terrain and every downstream fix is
-cosmetic.
+`Field.contract_error` records, per wet column, how far the finished ground sits
+above `water_top - MIN_VISIBLE_WATER_CLEARANCE`. That clearance is the same
+threshold `WaterSurface` uses to decide whether a column is wet: a bed flush
+with the sheet used to score a perfect contract error of 0 while the mesh culled
+the water as dry. The tests `drainage-surface contract holds` and `every wet
+column has bed below water` fail if any sampled column is short of that floor
+(`corridor_epsilon` is effectively zero). This is the single most important
+invariant in the project: if it drifts, rivers vanish under their own banks and
+every downstream fix is cosmetic.
 
 Overhangs use the mask *squared*. An undercut needs more clearance than a bump,
 and at half strength on the edge of a carved bank surface nets produces shards.
@@ -176,9 +182,12 @@ and at half strength on the edge of a carved bank surface nets produces shards.
 first is above the second. The shoreline therefore lands where the ground
 crosses the water at mesh resolution, not on a macro cell boundary 32 m away.
 
-The sheet's outer rim is still a voxel staircase, so the water shader fades alpha
-to zero over the last 0.9 m of depth. What you see is the contour where terrain
-meets water, which is smooth.
+The sheet's outer rim is still a voxel staircase. Alpha fades using the bed
+clearance authored into the mesh (with scene depth as fallback), so a LOD skirt
+or bank triangle in the depth buffer cannot erase a river that the field says
+is wet. Atlas trunk valleys are stamped as trunk corridor for the whole valley
+radius: local brooks may not form in that floor, or they read as dashed water
+in a dry trench.
 
 ### Determinism
 

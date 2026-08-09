@@ -35,7 +35,12 @@ static func water_surface_at(
 	if reach.is_empty():
 		return -INF
 	if float(reach["distance"]) <= float(reach["half_width"]):
-		return float(reach["water_z"])
+		# Match DensityField: under the continental bed, with freeboard, and not
+		# pulled into a deep slot by a buried polyline chord.
+		var height: float = continental.height_at(world_x, world_z)
+		var draped: float = minf(float(reach["water_z"]), height)
+		draped = maxf(draped, height - DensityField.MAX_CHORD_BURY)
+		return draped - DensityField.WATER_FREEBOARD
 	return -INF
 
 

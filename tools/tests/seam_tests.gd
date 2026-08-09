@@ -21,6 +21,10 @@ const EXACT: float = 0.0
 ## Density-field columns of two chunks meeting on a boundary are meshed on the
 ## same voxel lattice, so they may only differ by float32 rounding.
 const COLUMN_TOLERANCE: float = 0.01
+## Shared water may sit on the land, never above it.
+const WATER_FLOAT_TOLERANCE: float = 0.05
+## Metres a shared river may drop between consecutive stations.
+const MAX_STATION_DROP: float = 40.0
 ## Small atlas: big enough for real rivers and coast, small enough that the
 ## whole suite runs in seconds.
 const ATLAS_SIZE: int = 64
@@ -63,6 +67,7 @@ func _initialize() -> void:
 	_test_sector_overlap(west, east)
 	_test_generation_order(context, pair, west)
 	_test_water_ownership(west, east)
+	_test_shared_water_does_not_float(context, west, east)
 	_test_trunks_cross(west, east)
 	_test_chunk_seam(context, west, east)
 	_test_river_mouth(context)
@@ -549,6 +554,47 @@ func _test_water_ownership(west: WorldSector, east: WorldSector) -> void:
 			mismatched += 1
 	_check("port stubs are identical on both sides", mismatched == 0,
 		"(%d matching, %d differing)" % [matched, mismatched])
+
+
+## Atlas trunks and port stubs must be draped onto the continental surface.
+## Using the atlas elevation raw is what produces a canal floating over a
+## trench with a second river in the bed - both neighbours would agree on the
+## float, so seam symmetry alone cannot catch it.
+func _test_shared_water_does_not_float(
+	context: WorldContext, west: WorldSector, east: WorldSector
+) -> void:
+	print("- shared rivers do not float above the ground")
+	var continental: ContinentalTerrain = context.sampler()
+	var worst: float = 0.0
+	var offenders: int = 0
+	var stations: int = 0
+	var worst_drop: float = 0.0
+	for sector in [west, east]:
+		for reach in sector.hydro.rivers:
+			if not reach.is_shared:
+				continue
+			for i in reach.points.size():
+				stations += 1
+				var p: Vector3 = reach.points[i]
+				if i + 1 < reach.points.size():
+					worst_drop = maxf(worst_drop, p.y - reach.points[i + 1].y)
+				# Sea and atlas-lake beds are supposed to lie below their water.
+				# The failure mode is a canal floating over dry land.
+				if continental.shore_signed(p.x, p.z) <= 0.0:
+					continue
+				var float_m: float = p.y - continental.height_at(p.x, p.z)
+				if float_m > WATER_FLOAT_TOLERANCE:
+					offenders += 1
+					worst = maxf(worst, float_m)
+	_check("shared water stays on the ground", offenders == 0,
+		"(%d floating samples, worst +%.3f m over %d stations)" % [
+			offenders, worst, stations
+		])
+	# Draping a station onto ground that is not under the river - the lowest
+	# point of a disc, say - meets the check above and drops the river off the
+	# nearest cliff as a wall of water.
+	_check("shared water does not plunge", worst_drop <= MAX_STATION_DROP,
+		"(worst drop %.1f m between stations)" % worst_drop)
 
 
 func _test_trunks_cross(west: WorldSector, east: WorldSector) -> void:

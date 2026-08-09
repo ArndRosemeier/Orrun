@@ -262,6 +262,14 @@ func _choose_shots() -> void:
 		Vector3(ahead.x, ahead.y, ahead.z),
 		"trunk river, order %d" % trunk.order)
 
+	# Default-seed regression: FarTerrain used to chord a green strip across
+	# this trunk (player report at continental 179009, 84375). Viewpoint is
+	# absolute so it does not depend on which sector the game spawned in.
+	_add("01b_far_bridge_regression",
+		Vector2(179009.0, 84375.0), 45.0,
+		Vector3(179200.0, 34.0, 84430.0),
+		"FarTerrain must not bridge this trunk")
+
 	# Looking along a shoreline from just inland. Climbing high enough to frame a
 	# whole basin puts the camera outside the streamed ring, where the shot is
 	# mostly the hole where the world stops.

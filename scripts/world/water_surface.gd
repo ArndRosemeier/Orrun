@@ -12,7 +12,9 @@ extends RefCounted
 
 ## A cell with one corner under water still emits a full quad. The dry corners
 ## are covered by ground that is higher than the sheet, so the terrain draws the
-## shoreline and the overhang is never seen.
+## shoreline and the overhang is never seen. Must equal
+## [constant DensityField.MIN_VISIBLE_WATER_CLEARANCE]: that is the contract the
+## density field enforces, and this is the cull the mesh applies.
 const WET_EPSILON: float = 0.02
 
 
@@ -99,8 +101,15 @@ static func _emit_vertex(
 		return existing
 
 	var top: float = field.water_top[column]
+	var clearance: float = 0.0
 	if top == -INF:
 		top = fallback
+		# Dry corner pulled into a wet cell: give it a token depth so the shore
+		# fade still has something to work with. The real clearance lives on
+		# the wet corners.
+		clearance = WET_EPSILON * 2.0
+	else:
+		clearance = maxf(top - field.surface_z[column], WET_EPSILON)
 	var world: Vector3 = field.sample_world_position(ix, 0, iz)
 	var local: Vector3 = Vector3(
 		world.x - field.origin.x - voxel, top, world.z - field.origin.z - voxel
@@ -109,6 +118,9 @@ static func _emit_vertex(
 	var index: int = data.vertices.size()
 	data.vertices.append(local)
 	data.normals.append(Vector3.UP)
-	data.uvs.append(Vector2(world.x, world.z))
+	# UV.x is unused by the shader (ripples use world position). UV.y carries
+	# the bed clearance authored by the density field so alpha does not depend
+	# on whatever happens to sit in the scene depth buffer under the sheet.
+	data.uvs.append(Vector2(world.x, clearance))
 	vertex_at[column] = index
 	return index

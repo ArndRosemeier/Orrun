@@ -240,10 +240,11 @@ func _report() -> void:
 		"(worst queue %d, %d cancelled, worst chunks held for a sector %d)" % [
 			_worst_queue, streamer.stat_chunks_cancelled, _worst_waiting
 		])
-	_check("contract held while streaming",
+	_check("water beds stayed below their sheets while streaming",
 		streamer.stat_worst_contract_error <= streamer.config.corridor_epsilon,
-		"(worst %.3f m at chunk %s)" % [
-			streamer.stat_worst_contract_error, streamer.stat_worst_contract_chunk
+		"(worst clearance deficit %.3f m at chunk %s; need >= %.2f m)" % [
+			streamer.stat_worst_contract_error, streamer.stat_worst_contract_chunk,
+			DensityField.MIN_VISIBLE_WATER_CLEARANCE
 		])
 	_check("no missing prop meshes", PropLibrary.missing_ids().is_empty(),
 		"(%s)" % [PropLibrary.missing_ids()])

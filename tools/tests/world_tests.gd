@@ -15,6 +15,22 @@ const ATLAS_SIZE: int = 64
 ## Chunks sampled across the sector when a measurement needs to be honest
 ## rather than anecdotal.
 const SWEEP_STEP: int = 18
+## Shared water may sit on the land, never above it. A few centimetres covers
+## float32 noise on the continental sample; a metre of float is a canal in the sky.
+const WATER_FLOAT_TOLERANCE: float = 0.05
+## Metres a shared river may drop between consecutive stations. Stations are
+## close together after resampling, so this still allows a steep reach; what it
+## forbids is the hundred-metre curtain of water from draping onto the sea bed.
+const MAX_STATION_DROP: float = 40.0
+## Default-seed estuary where an atlas trunk used to float ~9 m above the
+## refined valley floor, with a local brook in the trench underneath.
+const FLOATING_TRUNK_REGRESSION_XZ: Vector2 = Vector2(179590.0, 86723.0)
+## Default-seed column beside a trunk where a nearby lower lake used to paint
+## a 7 m deep stepped hole into the river (land at ~36 m, lake sheet at ~29 m).
+const LAKE_HOLE_REGRESSION_XZ: Vector2 = Vector2(178258.0, 84542.0)
+## Default-seed trunk where FarTerrain's coarse grid used to chord across the
+## channel as a green land strip between two wet sheets.
+const FAR_BRIDGE_REGRESSION_XZ: Vector2 = Vector2(179009.0, 84375.0)
 
 var failures: int = 0
 var checks: int = 0
@@ -38,12 +54,17 @@ func _initialize() -> void:
 
 	_report_sector(sector)
 	_test_no_uphill_water(sector)
+	_test_shared_water_does_not_float(context, sector)
+	_test_no_local_rivers_in_atlas_valleys(context, sector)
 	_test_lakes(sector)
 	_test_rivers_reach_outlets(sector)
 	_test_roads_and_crossings(context, sector)
 	_test_chunks(context, sector)
 	_test_highland_relief(context)
 	_test_determinism(config, atlas, sector)
+	_test_floating_trunk_regression()
+	_test_lake_does_not_punch_holes_in_rivers()
+	_test_far_terrain_does_not_bridge_rivers()
 
 	print("---")
 	print("bake %d ms | %d checks | %d failures" % [bake_ms, checks, failures])
@@ -121,18 +142,10 @@ func _report_sector(sector: WorldSector) -> void:
 
 func _test_no_uphill_water(sector: WorldSector) -> void:
 	print("- water never flows uphill")
-	var worst_rise: float = 0.0
-	var offenders: int = 0
-	for reach in sector.hydro.rivers:
-		for i in range(1, reach.points.size()):
-			var rise: float = reach.points[i].y - reach.points[i - 1].y
-			if rise > 0.0001:
-				offenders += 1
-				worst_rise = maxf(worst_rise, rise)
-	_check("river profiles descend", offenders == 0,
-		"(%d rising stations, worst +%.3f m)" % [offenders, worst_rise])
-
-	# The drainage surface itself must never rise downstream either.
+	# Visible river polylines are draped onto the continental surface and are
+	# allowed to follow a bump in the bed; forcing them flat through the bump
+	# was what buried the sheet under the ground. The authority for downhill
+	# flow is the drainage surface on the macro grid.
 	var bad_cells: int = 0
 	var hydro: Hydrology = sector.hydro
 	for i in hydro.filled.size():
@@ -140,6 +153,337 @@ func _test_no_uphill_water(sector: WorldSector) -> void:
 		if down >= 0 and hydro.filled[down] > hydro.filled[i] + 0.0001:
 			bad_cells += 1
 	_check("drainage surface descends", bad_cells == 0, "(%d bad cells)" % bad_cells)
+
+
+## Atlas trunks and port stubs are reconstructed in XZ from shared geometry, but
+## their water height must be draped onto the continental surface. The atlas
+## elevation code is a kilometre average; when the refined valley sits below it,
+## using the atlas height raw lays a sheet of water in the air and every local
+## brook that found the real bed looks like a second river in a canyon.
+func _test_shared_water_does_not_float(
+	context: WorldContext, sector: WorldSector
+) -> void:
+	print("- shared rivers do not float above the ground")
+	var report: Dictionary = _shared_water_float_report(context, sector)
+	_check("shared water stays on the ground", report["offenders"] == 0,
+		"(%d floating stations, worst +%.3f m over %d stations)" % [
+			report["offenders"], report["worst"], report["stations"]
+		])
+	# Chords between stations may skim a bump or dip; the density field sits the
+	# visible sheet on the continental bed under the channel, so a buried chord
+	# is not the vanishing-river bug anymore. What still is: draping a station
+	# onto ground that is not under the river, which shows up as a plunge.
+	_check("shared water does not plunge", report["worst_drop"] <= MAX_STATION_DROP,
+		"(worst drop %.1f m between stations %.0f m apart)" % [
+			report["worst_drop"], report["worst_drop_run"]
+		])
+
+
+## Every shared reach measured against the land under it, on dry land only.
+## Under the sea or an atlas lake the bed is supposed to lie below the water, so
+## those samples are not this failure mode. Stations are held to
+## [constant WATER_FLOAT_TOLERANCE]; the worst station-to-station drop comes
+## back too, because draping onto ground that is not under the river shows up
+## as a plunge.
+func _shared_water_float_report(
+	context: WorldContext, sector: WorldSector
+) -> Dictionary:
+	var continental: ContinentalTerrain = context.sampler()
+	var worst: float = 0.0
+	var offenders: int = 0
+	var stations: int = 0
+	var worst_drop: float = 0.0
+	var worst_drop_run: float = 0.0
+	for reach in sector.hydro.rivers:
+		if not reach.is_shared:
+			continue
+		for i in reach.points.size():
+			stations += 1
+			var p: Vector3 = reach.points[i]
+			var float_m: float = _land_water_float(continental, p)
+			if float_m > WATER_FLOAT_TOLERANCE:
+				offenders += 1
+				worst = maxf(worst, float_m)
+			if i + 1 >= reach.points.size():
+				continue
+			var q: Vector3 = reach.points[i + 1]
+			var drop: float = p.y - q.y
+			if drop > worst_drop:
+				worst_drop = drop
+				worst_drop_run = Vector2(q.x - p.x, q.z - p.z).length()
+	return {
+		"offenders": offenders, "worst": worst, "stations": stations,
+		"worst_drop": worst_drop, "worst_drop_run": worst_drop_run,
+	}
+
+
+## Metres of float above the land surface, or -INF off dry land / when the
+## water sits in its bed. The canal-in-the-sky bug is a land-only failure.
+func _land_water_float(continental: ContinentalTerrain, station: Vector3) -> float:
+	if continental.shore_signed(station.x, station.z) <= 0.0:
+		return -INF
+	return station.y - continental.height_at(station.x, station.z)
+
+
+## Exact site of the floating-trunk bug on the default seed. Uses the production
+## atlas size, because the 64 km test atlas does not contain this estuary.
+func _test_floating_trunk_regression() -> void:
+	print("- regression: estuary trunk stays in its bed")
+	var config: WorldConfig = WorldConfig.new()
+	var atlas: ContinentAtlas = ContinentAtlas.generate(config.seed, config.atlas_size)
+	var context: WorldContext = WorldContext.create(config, atlas)
+	var at: Vector2 = FLOATING_TRUNK_REGRESSION_XZ
+	var sector: WorldSector = WorldSector.generate(
+		context, WorldCoords.sector_of(at.x, at.y)
+	)
+	print("  sector %s at the known estuary" % sector.sector)
+
+	var report: Dictionary = _shared_water_float_report(context, sector)
+	_check("shared water stays on the ground at the estuary",
+		report["offenders"] == 0,
+		"(%d floating stations, worst +%.3f m)" % [report["offenders"], report["worst"]])
+	_check("shared water does not plunge at the estuary",
+		report["worst_drop"] <= MAX_STATION_DROP,
+		"(worst drop %.1f m)" % report["worst_drop"])
+
+	var continental: ContinentalTerrain = context.sampler()
+	var nearest_d: float = INF
+	var trunk_water: float = 0.0
+	var trunk_ground: float = 0.0
+	for reach in sector.hydro.rivers:
+		if not reach.is_trunk:
+			continue
+		for p in reach.points:
+			var d: float = Vector2(p.x - at.x, p.z - at.y).length()
+			if d < nearest_d:
+				nearest_d = d
+				trunk_water = p.y
+				trunk_ground = continental.height_at(p.x, p.z)
+
+	_check("the known estuary still has a trunk nearby", nearest_d < 80.0,
+		"(nearest station %.1f m away)" % nearest_d)
+	_check("that trunk sits in the valley, not above it",
+		trunk_water <= trunk_ground + WATER_FLOAT_TOLERANCE,
+		"(water %.2f m, ground %.2f m, float %+.2f m)" % [
+			trunk_water, trunk_ground, trunk_water - trunk_ground
+		])
+
+
+## A local lake's spill used to paint wet columns on land well above that spill,
+## carving a stepped hole next to a higher trunk. The sheet must not sit in a
+## pit under dry continental ground.
+func _test_lake_does_not_punch_holes_in_rivers() -> void:
+	print("- regression: nearby lakes do not punch holes beside trunks")
+	var config: WorldConfig = WorldConfig.new()
+	var atlas: ContinentAtlas = ContinentAtlas.generate(config.seed, config.atlas_size)
+	var context: WorldContext = WorldContext.create(config, atlas)
+	var continental: ContinentalTerrain = context.sampler()
+	var at: Vector2 = LAKE_HOLE_REGRESSION_XZ
+	var sector: WorldSector = WorldSector.generate(
+		context, WorldCoords.sector_of(at.x, at.y)
+	)
+	var noise: NoiseSet = NoiseSet.create(config)
+	var chunk: Vector2i = WorldCoords.chunk_of(config, at.x, at.y)
+	var field: DensityField.Field = DensityField.build(
+		config, sector, continental, noise, chunk, 0
+	)
+	var ix: int = clampi(
+		int(round((at.x - field.origin.x) / field.voxel)), 0, field.dims.x - 1
+	)
+	var iz: int = clampi(
+		int(round((at.y - field.origin.z) / field.voxel)), 0, field.dims.z - 1
+	)
+	var col: int = field.column_index(ix, iz)
+	var water: float = field.water_top[col]
+	var ground: float = continental.height_at(at.x, at.y)
+	var pit: float = ground - water if water > -INF else 0.0
+	_check(
+		"column beside the trunk is not a deep lake pit",
+		water == -INF or pit <= _max_sheet_pit(),
+		"(water %s, continental %.2f m, pit %.2f m, allow %.2f m)" % [
+			"dry" if water == -INF else "%.2f m" % water,
+			ground, pit, _max_sheet_pit()
+		]
+	)
+	var deep_pits: int = 0
+	var worst_pit: float = 0.0
+	for cz in field.dims.z:
+		for cx in field.dims.x:
+			var c: int = field.column_index(cx, cz)
+			var top: float = field.water_top[c]
+			if top == -INF:
+				continue
+			var world: Vector3 = field.sample_world_position(cx, 0, cz)
+			var p: float = continental.height_at(world.x, world.z) - top
+			if p > _max_sheet_pit():
+				deep_pits += 1
+				worst_pit = maxf(worst_pit, p)
+	_check(
+		"no wet column is a deep pit under continental land",
+		deep_pits == 0,
+		"(%d pits, worst %.2f m below continental)" % [deep_pits, worst_pit]
+	)
+
+
+## How far below the continental surface a water sheet may sit. Rivers use a
+## freeboard plus a small chord-lift budget; anything deeper is a lake (or
+## similar) carved into land that was never under that water.
+func _max_sheet_pit() -> float:
+	return (
+		DensityField.MAX_CHORD_BURY
+		+ DensityField.WATER_FREEBOARD
+		+ 0.5
+	)
+
+
+## FarTerrain used to put an opaque plate through near river trenches (or chord
+## across them on its coarse grid), winning the depth test over the bed. Under
+## the streamed ring it must sit at world_floor; outside, below channel water.
+func _test_far_terrain_does_not_bridge_rivers() -> void:
+	print("- regression: FarTerrain does not bridge atlas trunks")
+	var config: WorldConfig = WorldConfig.new()
+	var atlas: ContinentAtlas = ContinentAtlas.generate(config.seed, config.atlas_size)
+	var context: WorldContext = WorldContext.create(config, atlas)
+	var continental: ContinentalTerrain = context.sampler()
+	var at: Vector2 = FAR_BRIDGE_REGRESSION_XZ
+	var sector: WorldSector = WorldSector.generate(
+		context, WorldCoords.sector_of(at.x, at.y)
+	)
+	var noise: NoiseSet = NoiseSet.create(config)
+	var near: Dictionary = sector.hydro.nearest_reach(at.x, at.y, 120.0)
+	_check("far-bridge regression has a trunk", not near.is_empty() and bool(
+		sector.hydro.rivers[int(near["reach"])].is_trunk
+	), "")
+	if near.is_empty():
+		return
+	var reach: RiverPolyline = sector.hydro.rivers[int(near["reach"])]
+	var step: float = FarTerrain.SPAN / float(FarTerrain.QUADS)
+	var hole: float = FarTerrain.near_hole_half_extent(config)
+	var above_bed: int = 0
+	var not_holed: int = 0
+	var worst_over: float = 0.0
+	var sample_at: Vector2 = Vector2.ZERO
+	var checked: int = 0
+	for i in reach.points.size():
+		var p: Vector3 = reach.points[i]
+		if Vector2(p.x - at.x, p.z - at.y).length() > 350.0:
+			continue
+		var stations: Array[Vector2] = [
+			Vector2(p.x, p.z),
+			Vector2(p.x + step * 0.5, p.z + step * 0.5),
+		]
+		for station in stations:
+			var nr: Dictionary = sector.hydro.nearest_reach(station.x, station.y, 64.0)
+			if nr.is_empty() or float(nr["distance"]) > float(nr["half_width"]):
+				continue
+			var chunk: Vector2i = WorldCoords.chunk_of(config, station.x, station.y)
+			var field: DensityField.Field = DensityField.build(
+				config, sector, continental, noise, chunk, 0
+			)
+			var ix: int = clampi(
+				int(round((station.x - field.origin.x) / field.voxel)),
+				0, field.dims.x - 1
+			)
+			var iz: int = clampi(
+				int(round((station.y - field.origin.z) / field.voxel)),
+				0, field.dims.z - 1
+			)
+			var col: int = field.column_index(ix, iz)
+			var water: float = field.water_top[col]
+			var bed: float = field.surface_z[col]
+			if water <= -INF:
+				continue
+			checked += 1
+			var far_y: float = FarTerrain.surface_y_at(
+				context, continental, station.x, station.y, step, at, hole
+			)
+			var in_ring: bool = (
+				maxf(absf(station.x - at.x), absf(station.y - at.y)) <= hole
+			)
+			if in_ring and far_y > config.world_floor + 0.5:
+				not_holed += 1
+				sample_at = station
+			# Looking down, FarTerrain wins the pixel if it sits above the bed.
+			if far_y > bed - 0.25:
+				above_bed += 1
+				worst_over = maxf(worst_over, far_y - bed)
+				sample_at = station
+	_check(
+		"FarTerrain hole covers the streamed ring at the regression",
+		not_holed == 0 and checked > 0,
+		"(%d stations, %d not at world_floor, hole %.0f m)" % [
+			checked, not_holed, hole
+		]
+	)
+	_check(
+		"FarTerrain sits below the chunk bed in the channel",
+		above_bed == 0 and checked > 0,
+		"(%d stations, %d above bed, worst %+0.2f m at %.0f,%.0f)" % [
+			checked, above_bed, worst_over, sample_at.x, sample_at.y
+		]
+	)
+
+
+## Atlas corridors carve valleys hundreds of metres wide. Local brooks that
+## form in that floor show up as thin dashed water in a dry trench - the look
+## that kept being reported as "underground river". Join tips near the channel
+## are allowed; parallel runs further out are not.
+func _test_no_local_rivers_in_atlas_valleys(
+	context: WorldContext, sector: WorldSector
+) -> void:
+	print("- local rivers stay out of atlas trunk valleys")
+	var offenders: int = 0
+	var worst_d: float = INF
+	var sample: Vector2 = Vector2.ZERO
+	for reach in sector.hydro.rivers:
+		if reach.is_shared:
+			continue
+		var parallel: int = 0
+		var parallel_d: float = INF
+		var parallel_at: Vector2 = Vector2.ZERO
+		for p in reach.points:
+			var best_d: float = INF
+			var best_half: float = 0.0
+			var best_valley: float = 0.0
+			var rect: Rect2 = Rect2(p.x - 500.0, p.z - 500.0, 1000.0, 1000.0)
+			for base in context.corridors.rivers_in_rect(rect):
+				var ax: float = context.corridors.rivers[base]
+				var az: float = context.corridors.rivers[base + 2]
+				var bx: float = context.corridors.rivers[base + 3]
+				var bz: float = context.corridors.rivers[base + 5]
+				var abx: float = bx - ax
+				var abz: float = bz - az
+				var len_sq: float = abx * abx + abz * abz
+				var t: float = 0.0
+				if len_sq > 0.000001:
+					t = clampf(
+						((p.x - ax) * abx + (p.z - az) * abz) / len_sq, 0.0, 1.0
+					)
+				var d: float = Vector2(
+					p.x - (ax + abx * t), p.z - (az + abz * t)
+				).length()
+				if d < best_d:
+					best_d = d
+					var feature_class: int = int(context.corridors.rivers[base + 8])
+					best_half = context.corridors.river_half_width(feature_class)
+					best_valley = context.corridors.river_valley_radius(feature_class)
+			if best_d < best_valley and best_d > best_half + 16.0:
+				parallel += 1
+				if best_d < parallel_d:
+					parallel_d = best_d
+					parallel_at = Vector2(p.x, p.z)
+		if parallel >= 2:
+			offenders += 1
+			if parallel_d < worst_d:
+				worst_d = parallel_d
+				sample = parallel_at
+	_check(
+		"no local reach runs parallel in an atlas valley",
+		offenders == 0,
+		"(%d reaches, nearest intrusion %.0f m from corridor at %.0f,%.0f)" % [
+			offenders, worst_d if worst_d < INF else -1.0, sample.x, sample.y
+		]
+	)
 
 
 func _test_lakes(sector: WorldSector) -> void:
@@ -502,11 +846,92 @@ func _test_chunks(context: WorldContext, sector: WorldSector) -> void:
 	worst_error = maxf(worst_error, sweep_worst)
 
 	_check("drainage-surface contract holds", worst_error <= config.corridor_epsilon,
-		"(worst ground-above-water %.3f m, epsilon %.2f)" % [
+		"(worst clearance deficit %.3f m, epsilon %.3f)" % [
 			worst_error, config.corridor_epsilon
 		])
+	_assert_beds_below_water(context, sector, continental, noise)
 	if built > 0:
 		print("  chunk build: %.1f ms average at LOD0" % [float(total_ms) / float(built)])
+
+
+## River (and lake) beds must sit strictly below the water that flows in them.
+## This is the invariant WaterSurface actually draws against: a flush bed used
+## to pass the old ground-above-water check with error 0 while the mesh culled
+## the column as dry, which is how underground river spots kept coming back.
+func _assert_beds_below_water(
+	context: WorldContext,
+	sector: WorldSector,
+	continental: ContinentalTerrain,
+	noise: NoiseSet
+) -> void:
+	print("- river beds sit strictly below their water")
+	var config: WorldConfig = context.config
+	var failing: int = 0
+	var wet: int = 0
+	var worst_clearance: float = INF
+	var worst_chunk: Vector2i = Vector2i(-1, -1)
+	var probes: Array[Vector2i] = _sweep_chunks(config, sector)
+	var river_chunk: Vector2i = _find_chunk(config, sector, "river")
+	var lake_chunk: Vector2i = _find_chunk(config, sector, "lake")
+	if river_chunk != Vector2i(-1, -1):
+		probes.append(river_chunk)
+	if lake_chunk != Vector2i(-1, -1):
+		probes.append(lake_chunk)
+	for probe in probes:
+		for lod in config.lod_count():
+			var field: DensityField.Field = DensityField.build(
+				config, sector, continental, noise, probe, lod
+			)
+			wet += field.wet_columns
+			failing += field.wet_columns_failing_clearance
+			if field.wet_columns > 0 and field.min_water_clearance < worst_clearance:
+				worst_clearance = field.min_water_clearance
+				worst_chunk = probe
+	_check(
+		"draw cull and density contract share one clearance",
+		is_equal_approx(WaterSurface.WET_EPSILON, DensityField.MIN_VISIBLE_WATER_CLEARANCE),
+		"(mesh %.3f m, field %.3f m)" % [
+			WaterSurface.WET_EPSILON, DensityField.MIN_VISIBLE_WATER_CLEARANCE
+		]
+	)
+	_check(
+		"every wet column has bed below water",
+		failing == 0 and wet > 0,
+		"(%d of %d wet columns short of %.2f m clearance; worst %.3f m at chunk %s)" % [
+			failing, wet, DensityField.MIN_VISIBLE_WATER_CLEARANCE,
+			worst_clearance if worst_clearance < INF else 0.0, worst_chunk
+		]
+	)
+	# Bed-below-water alone is not enough: a lake can carve a legal bed under a
+	# sheet that sits metres below dry continental land beside a higher river.
+	var deep_pits: int = 0
+	var worst_pit: float = 0.0
+	var pit_chunk: Vector2i = Vector2i(-1, -1)
+	var max_pit: float = _max_sheet_pit()
+	for probe in probes:
+		var field: DensityField.Field = DensityField.build(
+			config, sector, continental, noise, probe, 0
+		)
+		for iz in field.dims.z:
+			for ix in field.dims.x:
+				var col: int = field.column_index(ix, iz)
+				var top: float = field.water_top[col]
+				if top == -INF:
+					continue
+				var world: Vector3 = field.sample_world_position(ix, 0, iz)
+				var pit: float = continental.height_at(world.x, world.z) - top
+				if pit > max_pit:
+					deep_pits += 1
+					if pit > worst_pit:
+						worst_pit = pit
+						pit_chunk = probe
+	_check(
+		"no wet sheet sits in a deep pit under dry land",
+		deep_pits == 0,
+		"(%d pits, worst %.2f m at chunk %s; allow %.2f m)" % [
+			deep_pits, worst_pit, pit_chunk, max_pit
+		]
+	)
 
 
 ## A grid of chunks spread over the sector core.

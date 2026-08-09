@@ -6,9 +6,10 @@ extends RefCounted
 ## boundary belongs to the atlas and is reconstructed from it, identically, by
 ## every sector that touches it:
 ##
-##   trunk rivers   pure [AtlasCorridors] polylines, atlas water heights,
-##                  atlas feature class - never sector-local accumulation,
-##                  because 8 km of catchment cannot tell you how big a river is
+##   trunk rivers   pure [AtlasCorridors] polylines in XZ, draped onto the
+##                  continental surface for water height, atlas feature class -
+##                  never sector-local accumulation, because 8 km of catchment
+##                  cannot tell you how big a river is
 ##   ocean, atlas   the global signed shoreline in [ContinentalTerrain]
 ##   lakes
 ##   local brooks   solved here, and required to stay inside the sector core
@@ -35,11 +36,24 @@ const MAX_LAKE_DISTANCE: float = 512.0
 ## basin the drainage never left. Well under the sector halo, so both
 ## neighbours see the whole basin and reach the same verdict about it.
 const LOCAL_LAKE_MAX_SPAN: float = 1200.0
-## Metres either side of a trunk centreline that count as the trunk corridor.
-const TRUNK_MARGIN: float = 6.0
+## Extra metres beyond the atlas valley radius still claimed as trunk corridor.
+##
+## The continental surface carves a valley out to [method AtlasCorridors.river_valley_radius].
+## Local brooks that form anywhere inside that carve show up as thin dashed
+## water in a wide dry trench - the "river goes underground" look. The trunk
+## stamp therefore covers the whole valley, not just the channel half-width.
+const TRUNK_VALLEY_PAD: float = 16.0
 ## Local reaches are capped below the trunk order so a brook can never claim to
 ## be wider than the river it joins.
 const LOCAL_MAX_ORDER: int = 3
+## How far apart draped trunk stations are, in metres.
+##
+## Atlas corridor vertices are hundreds of metres apart. A straight water chord
+## between them cuts through every bump in the refined valley floor: the
+## monotonic drape holds the water down, the ground rises over the sheet, and
+## the river disappears under its own banks. Resampling at a spacing the
+## density field can resolve keeps the chord on the land.
+const TRUNK_STATION_SPACING: float = 8.0
 ## Stations along a port stub, on each side of the boundary.
 const STUB_STATIONS: int = 6
 
@@ -152,7 +166,10 @@ func _classify_cells() -> void:
 		var az: float = corridors.rivers[base + 2]
 		var bx: float = corridors.rivers[base + 3]
 		var bz: float = corridors.rivers[base + 5]
-		var half: float = corridors.rivers[base + 6] + TRUNK_MARGIN
+		var feature_class: int = int(corridors.rivers[base + 8])
+		var half: float = (
+			corridors.river_valley_radius(feature_class) + TRUNK_VALLEY_PAD
+		)
 		_stamp_trunk(ax, az, bx, bz, half)
 
 
@@ -470,19 +487,61 @@ func _emit_trunk_reach(run: PackedInt32Array) -> void:
 	reach.depth = config.river_depth_base + float(order - 1) * config.river_depth_per_order
 	reach.valley = config.river_valley_base + float(order - 1) * config.river_valley_per_order
 
-	var points: PackedVector3Array = PackedVector3Array()
-	var widths: PackedFloat32Array = PackedFloat32Array()
+	# Corridor vertices only: XZ and atlas water, no drape yet. Both neighbours
+	# see the same run of bases, so they build the same coarse polyline.
+	var coarse_x: PackedFloat32Array = PackedFloat32Array()
+	var coarse_z: PackedFloat32Array = PackedFloat32Array()
+	var coarse_atlas: PackedFloat32Array = PackedFloat32Array()
+	var coarse_half: PackedFloat32Array = PackedFloat32Array()
 	for i in run.size():
 		var base: int = run[i]
 		if i == 0:
-			points.append(Vector3(
-				corridors.rivers[base], corridors.rivers[base + 1], corridors.rivers[base + 2]
-			))
-			widths.append(corridors.rivers[base + 6])
-		points.append(Vector3(
-			corridors.rivers[base + 3], corridors.rivers[base + 4], corridors.rivers[base + 5]
-		))
-		widths.append(corridors.rivers[base + 7])
+			coarse_x.append(corridors.rivers[base])
+			coarse_atlas.append(corridors.rivers[base + 1])
+			coarse_z.append(corridors.rivers[base + 2])
+			coarse_half.append(corridors.rivers[base + 6])
+		coarse_x.append(corridors.rivers[base + 3])
+		coarse_atlas.append(corridors.rivers[base + 4])
+		coarse_z.append(corridors.rivers[base + 5])
+		coarse_half.append(corridors.rivers[base + 7])
+
+	# Prefix lengths along the coarse centreline, so resampling is a pure
+	# function of the shared corridor geometry.
+	var prefix: PackedFloat32Array = PackedFloat32Array()
+	prefix.append(0.0)
+	for i in range(1, coarse_x.size()):
+		prefix.append(
+			prefix[i - 1]
+			+ Vector2(coarse_x[i] - coarse_x[i - 1], coarse_z[i] - coarse_z[i - 1]).length()
+		)
+	var total: float = prefix[prefix.size() - 1]
+	if total <= 0.001:
+		return
+
+	# XZ stays on the atlas centreline so the channel is shared. Water height is
+	# draped onto the refined surface: the atlas elevation is a kilometre
+	# average and will float a canal in the air wherever detail has dug the
+	# valley deeper. Stations are dense enough that a straight chord between
+	# them cannot climb through a bump and bury the sheet under the ground.
+	var points: PackedVector3Array = PackedVector3Array()
+	var widths: PackedFloat32Array = PackedFloat32Array()
+	var sample_count: int = maxi(2, int(ceil(total / TRUNK_STATION_SPACING)) + 1)
+	var seg: int = 0
+	for s in sample_count:
+		var dist: float = total if s == sample_count - 1 else float(s) * TRUNK_STATION_SPACING
+		dist = minf(dist, total)
+		while seg + 1 < prefix.size() and prefix[seg + 1] < dist:
+			seg += 1
+		var seg_len: float = prefix[seg + 1] - prefix[seg]
+		var t: float = 0.0 if seg_len <= 0.001 else (dist - prefix[seg]) / seg_len
+		points.append(
+			_drape_water_station(
+				lerpf(coarse_x[seg], coarse_x[seg + 1], t),
+				lerpf(coarse_atlas[seg], coarse_atlas[seg + 1], t),
+				lerpf(coarse_z[seg], coarse_z[seg + 1], t)
+			)
+		)
+		widths.append(lerpf(coarse_half[seg], coarse_half[seg + 1], t))
 
 	if points.size() < 2:
 		return
@@ -490,6 +549,28 @@ func _emit_trunk_reach(run: PackedInt32Array) -> void:
 	reach.half_width = widths
 	reach.compute_bounds()
 	rivers.append(reach)
+
+
+## Water height for one station on a shared channel: the atlas (or drainage)
+## height, but never above the land under the station itself. Pure in
+## continental metres, so two sectors that share the station agree.
+##
+## Grade is left alone on purpose. Forcing the sheet not to rise across a bump
+## buries it under the land; the density field then has to cut a slot canyon,
+## and at ordinary LOD the ground mesh bridges that slot so the river vanishes.
+## The atlas corridor and the continental valley already descend overall; the
+## visible water just has to sit in the bed.
+##
+## The sample is the centreline and nothing else. Searching a disc for the
+## lowest ground nearby is a catastrophe beside a coastal cliff: the lowest
+## ground within a hundred metres is the sea bed, and the river falls off the
+## cliff as a wall of water.
+func _drape_water_station(world_x: float, ceiling: float, world_z: float) -> Vector3:
+	return Vector3(
+		world_x,
+		minf(continental.height_at(world_x, world_z), ceiling),
+		world_z
+	)
 
 
 # --- Port stubs ---------------------------------------------------------------------------
@@ -534,16 +615,16 @@ func _emit_port_stub(port: SectorEdgeContract.Port, length: float) -> void:
 	for i in range(-STUB_STATIONS, STUB_STATIONS + 1):
 		var s: float = float(i) / float(STUB_STATIONS) * length
 		var at: Vector2 = port.position + port.tangent * s
-		# The port's own height at the boundary, the real ground elsewhere, and
-		# never rising downstream - so the stub is a channel in the land rather
-		# than a ribbon of water laid over it.
+		# The port's own height at the boundary and the real ground elsewhere.
+		# Stubs stay monotonic: both neighbours build the same short run, and
+		# the seam tests require the contract crossing not to rise.
 		var ground: float = continental.height_at(at.x, at.y)
 		var water: float = minf(ground, port.surface_z + port.grade * s)
 		if water > previous:
 			water = previous
 		previous = water
 		points.append(Vector3(at.x, water, at.y))
-		widths.append(port.half_width)
+		widths.append(maxf(port.half_width, config.river_width_base))
 
 	reach.points = points
 	reach.half_width = widths
@@ -652,7 +733,69 @@ func _build_local_rivers(noise: NoiseSet) -> void:
 		rivers.append(reach)
 
 	_link_downstream(cell_owner, end_cells)
+	_cull_local_reaches_in_trunk_valleys()
 	_join_confluences()
+
+
+## Drops local reaches that run through an atlas trunk valley.
+##
+## The cell stamp should already prevent channels there, but meander, Chaikin,
+## and the one trunk cell appended at a confluence can still leave polyline
+## geometry in the valley floor. Anything that is not clearly a join tip onto
+## the channel itself becomes dashed water in a dry trench.
+func _cull_local_reaches_in_trunk_valleys() -> void:
+	var kept: Array[RiverPolyline] = []
+	var remap: Dictionary = {}
+	for reach in rivers:
+		if reach.is_shared or not _reach_intrudes_trunk_valley(reach):
+			remap[reach.id] = kept.size()
+			kept.append(reach)
+	rivers = kept
+	for i in rivers.size():
+		rivers[i].id = i
+		var down: int = rivers[i].downstream_id
+		if down >= 0 and remap.has(down):
+			rivers[i].downstream_id = int(remap[down])
+		else:
+			rivers[i].downstream_id = -1
+
+
+func _reach_intrudes_trunk_valley(reach: RiverPolyline) -> bool:
+	var inside_valley: int = 0
+	var parallel: int = 0
+	for p in reach.points:
+		var best_d: float = INF
+		var best_half: float = 0.0
+		var best_valley: float = 0.0
+		var rect: Rect2 = Rect2(p.x - 500.0, p.z - 500.0, 1000.0, 1000.0)
+		for base in corridors.rivers_in_rect(rect):
+			var ax: float = corridors.rivers[base]
+			var az: float = corridors.rivers[base + 2]
+			var bx: float = corridors.rivers[base + 3]
+			var bz: float = corridors.rivers[base + 5]
+			var abx: float = bx - ax
+			var abz: float = bz - az
+			var len_sq: float = abx * abx + abz * abz
+			var t: float = 0.0
+			if len_sq > 0.000001:
+				t = clampf(((p.x - ax) * abx + (p.z - az) * abz) / len_sq, 0.0, 1.0)
+			var d: float = Vector2(p.x - (ax + abx * t), p.z - (az + abz * t)).length()
+			if d < best_d:
+				best_d = d
+				var feature_class: int = int(corridors.rivers[base + 8])
+				best_half = corridors.river_half_width(feature_class)
+				best_valley = corridors.river_valley_radius(feature_class)
+		if best_d >= best_valley:
+			continue
+		inside_valley += 1
+		# Join tips sit near the channel; parallel runs sit out in the floor.
+		if best_d > best_half + TRUNK_VALLEY_PAD:
+			parallel += 1
+	if parallel >= 2:
+		return true
+	# A reach that is mostly inside the valley even if every sample is somehow
+	# near the channel is still wrong: that water belongs to the trunk.
+	return inside_valley >= maxi(reach.points.size() / 2, 3)
 
 
 ## True for the part of the core this sector may put its own water in: the core
@@ -684,7 +827,13 @@ func _chain_to_polyline(
 	_apply_meander(raw, noise)
 	var smooth: PackedVector3Array = _chaikin(raw, 2)
 	var smooth_widths: PackedFloat32Array = _resample_widths(widths, smooth.size())
-	_force_monotonic(smooth)
+	# Meander and Chaikin walk the polyline off the cell centres whose filled
+	# height it inherited. On the refined surface that is often a shoulder a
+	# few metres above the real bed, which is the same floating-canal look the
+	# trunk drape exists to kill. Pin every station back under the land. Do not
+	# re-apply a monotonic clamp afterwards: holding the sheet down across a
+	# bump buries it, and the river disappears under its own banks.
+	_drape_polyline(smooth)
 
 	reach.points = smooth
 	reach.half_width = smooth_widths
@@ -759,11 +908,12 @@ func _apply_meander(points: PackedVector3Array, noise: NoiseSet) -> void:
 		)
 
 
-func _force_monotonic(points: PackedVector3Array) -> void:
-	for i in range(1, points.size()):
-		var prev_y: float = points[i - 1].y
-		if points[i].y > prev_y:
-			points[i] = Vector3(points[i].x, prev_y, points[i].z)
+## Pulls every station under the continental surface.
+func _drape_polyline(points: PackedVector3Array) -> void:
+	for i in points.size():
+		var p: Vector3 = points[i]
+		var water: float = minf(p.y, continental.height_at(p.x, p.z))
+		points[i] = Vector3(p.x, water, p.z)
 
 
 static func _chaikin(points: PackedVector3Array, iterations: int) -> PackedVector3Array:
