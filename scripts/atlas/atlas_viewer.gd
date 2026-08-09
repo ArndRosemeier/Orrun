@@ -11,6 +11,9 @@ const MIN_ZOOM: float = 0.15
 const MAX_ZOOM: float = 384.0
 ## Per-cell overlay starts once a cell is large enough to hold several lines.
 const DETAIL_CELL_PX: float = 56.0
+static var VIEW_MODE_NAMES: PackedStringArray = PackedStringArray([
+	"biome", "elevation", "humidity", "relief", "population"
+])
 
 var atlas: ContinentAtlas
 
@@ -66,7 +69,7 @@ func _gui_input(event: InputEvent) -> void:
 		elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN and mb.pressed:
 			_zoom_at(mb.position, 1.0 / 1.15)
 		elif mb.button_index == MOUSE_BUTTON_RIGHT and mb.pressed:
-			_view_mode = (_view_mode + 1) % 4
+			_view_mode = (_view_mode + 1) % VIEW_MODE_NAMES.size()
 			_texture = ImageTexture.create_from_image(_render_overview())
 			queue_redraw()
 	elif event is InputEventMouseMotion:
@@ -116,12 +119,14 @@ func _draw() -> void:
 	var map_size: Vector2 = Vector2(float(atlas.size), float(atlas.size)) * _zoom
 	draw_texture_rect(_texture, Rect2(_pan, map_size), false)
 
-	_draw_feature_overlays()
+	# Cell dim/text first; rivers and roads must paint above that overlay or
+	# deep zoom looks like broken, gappy channels.
 	if _zoom >= DETAIL_CELL_PX:
 		_draw_cell_details()
+	_draw_feature_overlays()
 
 	# HUD
-	var mode_name: String = ["biome", "elevation", "humidity", "relief"][_view_mode]
+	var mode_name: String = VIEW_MODE_NAMES[_view_mode]
 	draw_rect(Rect2(0, 0, size.x, 44), Color(0, 0, 0, 0.55))
 	draw_string(
 		ThemeDB.fallback_font, Vector2(12, 18),
@@ -191,7 +196,14 @@ func _draw_feature_overlays() -> void:
 				color = Color(0.75, 0.75, 0.8)
 			AtlasFeatures.NodeKind.CLAIM_RESERVED:
 				color = Color(0.85, 0.25, 0.7)
-		draw_circle(p, maxf(_zoom * 0.18, 2.0), color)
+			AtlasFeatures.NodeKind.SETTLEMENT:
+				color = Color(1.0, 0.97, 0.85)
+		var radius: float = maxf(_zoom * 0.18, 2.0)
+		if node.kind == AtlasFeatures.NodeKind.SETTLEMENT:
+			# Towns are the road hubs; make them read before wilderness dots.
+			radius = maxf(_zoom * 0.3, 3.5)
+			draw_circle(p, radius * 1.6, Color(0.15, 0.09, 0.05, 0.75))
+		draw_circle(p, radius, color)
 
 
 func _draw_link_curve(
@@ -199,55 +211,78 @@ func _draw_link_curve(
 ) -> void:
 	var a: Vector2 = _endpoint_screen(ax, az, link.a)
 	var b: Vector2 = _endpoint_screen(ax, az, link.b)
+	# Pin through the cell centre with no random offset so neighbouring cells
+	# that share an edge port meet exactly at that port.
 	var mid: Vector2 = _cell_to_screen(ax, az) + Vector2(_zoom, _zoom) * 0.5
-	# Deterministic bend so cardinal edge ports do not read as a circuit board.
-	var h: int = int(hash("%d:%d:%d" % [atlas.world_seed, ax, az]))
-	var bend: float = (float((h % 1000) - 500) / 500.0) * _zoom * 0.18
-	var tangent: Vector2 = (b - a).normalized()
-	var normal: Vector2 = Vector2(-tangent.y, tangent.x)
-	mid += normal * bend
-	var line_w: float = maxf(width * _zoom * 0.07, width)
-	var prev: Vector2 = a
-	for step in range(1, 5):
-		var t: float = float(step) / 4.0
-		var p: Vector2 = (
-			(1.0 - t) * (1.0 - t) * a
-			+ 2.0 * (1.0 - t) * t * mid
-			+ t * t * b
-		)
-		draw_line(prev, p, color, line_w)
-		prev = p
+	var line_w: float = maxf(width * _zoom * 0.08, width)
+	var points: PackedVector2Array = PackedVector2Array()
+	if a.distance_squared_to(b) < 0.25:
+		points.append(a)
+		points.append(b)
+	elif a.distance_squared_to(mid) < 0.25 or b.distance_squared_to(mid) < 0.25:
+		points.append(a)
+		points.append(b)
+	else:
+		var steps: int = 6
+		for step in range(steps + 1):
+			var t: float = float(step) / float(steps)
+			points.append(
+				(1.0 - t) * (1.0 - t) * a
+				+ 2.0 * (1.0 - t) * t * mid
+				+ t * t * b
+			)
+	draw_polyline(points, color, line_w, true)
 
 
 func _endpoint_screen(ax: int, az: int, endpoint: AtlasEndpoint) -> Vector2:
 	if endpoint.kind == AtlasFeatures.EndpointKind.EDGE_PORT:
-		var owner: Vector3i = AtlasFeatures.edge_owner(endpoint.ref_id)
-		var ports: Array = []
-		if atlas.river_ports.has(endpoint.ref_id):
-			ports = atlas.river_ports[endpoint.ref_id]
-		elif atlas.road_ports.has(endpoint.ref_id):
-			ports = atlas.road_ports[endpoint.ref_id]
-		var t: float = 0.5
-		for p in ports:
-			var port: AtlasPort = p
-			if port.id == endpoint.port_id:
-				t = port.t
-				break
-		var dir: int = owner.z
-		var ox: int = owner.x
-		var oz: int = owner.y
-		# Port lies on owner cell's east or south edge.
-		var local: Vector2
-		if dir == AtlasFeatures.Dir.EAST:
-			local = Vector2(float(ox + 1), float(oz) + t)
-		else:
-			local = Vector2(float(ox) + t, float(oz + 1))
-		return _pan + local * _zoom
+		return _edge_port_screen(endpoint.ref_id, endpoint.port_id)
+	if (
+		endpoint.kind == AtlasFeatures.EndpointKind.OCEAN
+		or endpoint.kind == AtlasFeatures.EndpointKind.LAKE
+	):
+		# Mouths terminate on the land cell edge that faces the sink, so the
+		# channel visually reaches water instead of stopping at the cell centre.
+		var idx: int = atlas.index_of(ax, az)
+		if atlas.river_receiver.size() > idx:
+			var down: int = atlas.river_receiver[idx]
+			if down >= 0:
+				var dx: int = (down % atlas.size) - ax
+				var dz: int = (down / atlas.size) - az
+				if absi(dx) + absi(dz) == 1:
+					var local: Vector2 = Vector2(float(ax) + 0.5, float(az) + 0.5)
+					local += Vector2(float(dx), float(dz)) * 0.5
+					return _pan + local * _zoom
 	if endpoint.kind == AtlasFeatures.EndpointKind.NODE and endpoint.ref_id >= 0:
 		for node in atlas.nodes:
 			if node.id == endpoint.ref_id:
 				return _cell_to_screen(node.ax, node.az) + Vector2(_zoom, _zoom) * 0.5
 	return _cell_to_screen(ax, az) + Vector2(_zoom, _zoom) * 0.5
+
+
+func _edge_port_screen(edge_key: int, port_id: int) -> Vector2:
+	var owner: Vector3i = AtlasFeatures.edge_owner(edge_key)
+	var ports: Array = []
+	if atlas.river_ports.has(edge_key):
+		ports = atlas.river_ports[edge_key]
+	elif atlas.road_ports.has(edge_key):
+		ports = atlas.road_ports[edge_key]
+	var t: float = 0.5
+	for p in ports:
+		var port: AtlasPort = p
+		if port.id == port_id:
+			t = port.t
+			break
+	# Fall back to the sole port on this edge when ids drifted.
+	if ports.size() == 1:
+		var only: AtlasPort = ports[0]
+		t = only.t
+	var local: Vector2
+	if owner.z == AtlasFeatures.Dir.EAST:
+		local = Vector2(float(owner.x + 1), float(owner.y) + t)
+	else:
+		local = Vector2(float(owner.x) + t, float(owner.y + 1))
+	return _pan + local * _zoom
 
 
 func _draw_cell_details() -> void:
@@ -333,6 +368,13 @@ func _render_overview() -> Image:
 				3:
 					var r: float = float(AtlasPack.relief(packed)) / 63.0
 					color = Color(0.2, 0.25, 0.2).lerp(Color(0.85, 0.8, 0.7), r)
+				4:
+					color = Color(0.05, 0.07, 0.10)
+					if AtlasBiomes.is_land(AtlasPack.biome(packed)):
+						var p: float = float(AtlasPack.population(packed)) / 15.0
+						color = Color(0.13, 0.14, 0.13)
+						if p > 0.0:
+							color = Color(0.35, 0.22, 0.10).lerp(Color(1.0, 0.92, 0.55), p)
 				_:
 					color = AtlasBiomes.color_of(AtlasPack.biome(packed))
 					if AtlasBiomes.is_land(AtlasPack.biome(packed)):

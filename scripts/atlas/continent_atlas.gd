@@ -15,7 +15,14 @@ const MAX_ROAD_PORTS: int = 2
 const LAKE_MIN_DEPTH_CODE: int = 3
 const LAKE_MIN_CELLS: int = 6
 const LAKE_MAX_CELLS_FULL: int = 450
-const PRIMARY_NODE_TARGET: int = 48
+const PRIMARY_NODE_TARGET: int = 72
+## Occupancy is sparse: land below this score stays at population 0.
+const POPULATION_THRESHOLD: float = 0.66
+const POPULATION_SCORE_SPAN: float = 1.0
+## Cells this far from a river mouth still get a share of the port bonus.
+const POPULATION_MOUTH_RADIUS: int = 2
+## Population at or above this promotes a node to SETTLEMENT.
+const SETTLEMENT_MIN_POP: int = 7
 
 static var NEIGHBOR_DX: PackedInt32Array = PackedInt32Array([1, 1, 0, -1, -1, -1, 0, 1])
 static var NEIGHBOR_DZ: PackedInt32Array = PackedInt32Array([0, 1, 1, 1, 0, -1, -1, -1])
@@ -166,6 +173,37 @@ func validate() -> PackedStringArray:
 	errors.append_array(_validate_river_termination())
 	errors.append_array(_validate_river_monotonicity())
 	errors.append_array(_validate_road_backbone())
+	errors.append_array(_validate_population())
+	return errors
+
+
+func _validate_population() -> PackedStringArray:
+	var errors: PackedStringArray = PackedStringArray()
+	var land: int = 0
+	var occupied: int = 0
+	var water_occupied: int = 0
+	for i in cells.size():
+		var pop: int = AtlasPack.population(cells[i])
+		if AtlasBiomes.is_land(AtlasPack.biome(cells[i])):
+			land += 1
+			if pop > 0:
+				occupied += 1
+		elif pop > 0:
+			water_occupied += 1
+
+	if water_occupied > 0:
+		errors.append("population on %d water cells" % water_occupied)
+	if land == 0:
+		return errors
+	if occupied == 0:
+		errors.append("no populated land cells")
+	# Occupancy is meant to be sparse peaks, not a field painted over the map.
+	if float(occupied) / float(land) > 0.5:
+		errors.append(
+			"population not sparse (%.0f%% of land occupied)" % [
+				100.0 * float(occupied) / float(land)
+			]
+		)
 	return errors
 
 
@@ -368,6 +406,44 @@ func _validate_road_backbone() -> PackedStringArray:
 					mass, connected, ids.size()
 				]
 			)
+
+	# Coverage floors so the backbone cannot silently starve to a couple of stubs.
+	var min_nodes: int = maxi(8, size / 20)
+	if nodes.size() < min_nodes:
+		errors.append("too few road nodes (%d < %d)" % [nodes.size(), min_nodes])
+	var expected_primary_edges: int = 0
+	for mass in by_mass:
+		var mass_n: int = (by_mass[mass] as Array).size()
+		if mass_n >= 2:
+			expected_primary_edges += mass_n - 1
+	if primary_road_edges.size() < expected_primary_edges:
+		errors.append(
+			"primary road edges starved (%d edges, need %d)" % [
+				primary_road_edges.size(), expected_primary_edges
+			]
+		)
+	var min_road_cells: int = maxi(24, nodes.size() * 4)
+	if road_links.size() < min_road_cells:
+		errors.append(
+			"road cell coverage starved (%d cells < %d)" % [
+				road_links.size(), min_road_cells
+			]
+		)
+	var through_cells: int = 0
+	for cell_idx in road_links:
+		for link_variant in road_links[cell_idx]:
+			var link: AtlasLink = link_variant
+			if (
+				link.a.kind == AtlasFeatures.EndpointKind.EDGE_PORT
+				and link.b.kind == AtlasFeatures.EndpointKind.EDGE_PORT
+				and link.a.ref_id != link.b.ref_id
+			):
+				through_cells += 1
+				break
+	if through_cells < maxi(8, min_road_cells / 2):
+		errors.append(
+			"road through-links starved (%d cells with distinct edge ports)" % through_cells
+		)
 	return errors
 
 
@@ -412,8 +488,11 @@ func _build() -> void:
 	_merge_coastal_lakes_into_ocean(land, elev_code)
 	_label_landmasses(land)
 	_classify_and_pack(land, elev_code, humidity, relief)
-	_seed_nodes()
+	# Rivers first: mouths are the strongest settlement signal, and nodes should
+	# be placed once population is known so roads serve towns, not random dots.
 	_build_rivers(elev_code)
+	_seed_population()
+	_seed_nodes()
 	_build_roads(elev_code)
 	_find_crossings()
 
@@ -1050,16 +1129,162 @@ func _classify_land(
 	return AtlasBiomes.Id.PLAINS
 
 
+## Sparse land occupancy, seeded after rivers. Humidity decides whether land is
+## habitable at all, river corridors concentrate it, and mouths into ocean/lake
+## anchor the densest cores. Most land stays at 0.
+func _seed_population() -> void:
+	var count: int = size * size
+	var mouth_dist: PackedInt32Array = _river_mouth_distances()
+	var grain: FastNoiseLite = _make_noise(
+		"atlas_population", 0.045, FastNoiseLite.FRACTAL_FBM, 3
+	)
+	var region: FastNoiseLite = _make_noise(
+		"atlas_pop_region", 0.007, FastNoiseLite.FRACTAL_FBM, 3
+	)
+
+	for az in size:
+		for ax in size:
+			var idx: int = index_of(ax, az)
+			var packed: int = cells[idx]
+			var biome: int = AtlasPack.biome(packed)
+			var pop: int = 0
+			if AtlasBiomes.is_land(biome):
+				var score: float = _population_score(
+					ax, az, idx, packed, biome, mouth_dist[idx], grain, region
+				)
+				if score > POPULATION_THRESHOLD:
+					var t: float = (score - POPULATION_THRESHOLD) / POPULATION_SCORE_SPAN
+					pop = clampi(1 + int(t * 15.0), 1, 15)
+			cells[idx] = AtlasPack.pack(
+				AtlasPack.elevation(packed),
+				AtlasPack.humidity(packed),
+				biome,
+				AtlasPack.relief(packed),
+				pop
+			)
+
+
+## Ring distance from each land cell to the nearest river mouth, capped at
+## POPULATION_MOUTH_RADIUS. -1 means "outside the port hinterland".
+func _river_mouth_distances() -> PackedInt32Array:
+	var count: int = size * size
+	var dist: PackedInt32Array = PackedInt32Array()
+	dist.resize(count)
+	for i in count:
+		dist[i] = -1
+
+	var frontier: PackedInt32Array = PackedInt32Array()
+	for cell_variant in river_links:
+		var cell: int = int(cell_variant)
+		if not _cell_is_river_mouth(cell):
+			continue
+		dist[cell] = 0
+		frontier.append(cell)
+
+	var ring: int = 0
+	while ring < POPULATION_MOUTH_RADIUS and frontier.size() > 0:
+		var next: PackedInt32Array = PackedInt32Array()
+		for cell in frontier:
+			var cx: int = cell % size
+			var cz: int = cell / size
+			for k in 8:
+				var nx: int = cx + NEIGHBOR_DX[k]
+				var nz: int = cz + NEIGHBOR_DZ[k]
+				if not in_bounds(nx, nz):
+					continue
+				var nb: int = index_of(nx, nz)
+				if dist[nb] >= 0 or not AtlasBiomes.is_land(AtlasPack.biome(cells[nb])):
+					continue
+				dist[nb] = ring + 1
+				next.append(nb)
+		frontier = next
+		ring += 1
+	return dist
+
+
+func _cell_is_river_mouth(cell: int) -> bool:
+	for link_variant in river_links[cell]:
+		var link: AtlasLink = link_variant
+		if (
+			link.b.kind == AtlasFeatures.EndpointKind.OCEAN
+			or link.b.kind == AtlasFeatures.EndpointKind.LAKE
+		):
+			return true
+	return false
+
+
+func _population_score(
+	ax: int,
+	az: int,
+	idx: int,
+	packed: int,
+	biome: int,
+	mouth_dist: int,
+	grain: FastNoiseLite,
+	region: FastNoiseLite
+) -> float:
+	var humidity: float = float(AtlasPack.humidity(packed)) / 255.0
+	var relief: float = float(AtlasPack.relief(packed)) / 63.0
+	var elevation: int = AtlasPack.elevation(packed)
+
+	var score: float = smoothstep(0.28, 0.78, humidity) * 0.5
+	score -= relief * 0.65
+	if elevation > 190:
+		score -= 0.55
+	elif elevation > 150:
+		score -= 0.22
+
+	match biome:
+		AtlasBiomes.Id.ARID:
+			score -= 0.4
+		AtlasBiomes.Id.ALPINE:
+			score -= 0.6
+		AtlasBiomes.Id.TUNDRA:
+			score -= 0.35
+		AtlasBiomes.Id.WETLAND:
+			score -= 0.1
+		AtlasBiomes.Id.COAST:
+			score += 0.14
+
+	if river_links.has(idx):
+		score += 0.38
+	elif _touches_river(ax, az):
+		score += 0.14
+
+	if mouth_dist == 0:
+		score += 0.9
+	elif mouth_dist > 0:
+		score += lerpf(0.55, 0.12, float(mouth_dist - 1) / float(POPULATION_MOUTH_RADIUS))
+
+	# Regional bias keeps occupancy clustered; grain breaks ties inside a region.
+	score += region.get_noise_2d(float(ax), float(az)) * 0.22
+	score += grain.get_noise_2d(float(ax), float(az)) * 0.14
+	return score
+
+
+func _touches_river(ax: int, az: int) -> bool:
+	for k in 8:
+		var nx: int = ax + NEIGHBOR_DX[k]
+		var nz: int = az + NEIGHBOR_DZ[k]
+		if in_bounds(nx, nz) and river_links.has(index_of(nx, nz)):
+			return true
+	return false
+
+
 func _seed_nodes() -> void:
 	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
 	rng.seed = _layer_seed("atlas_nodes")
-	var target: int = maxi(8, PRIMARY_NODE_TARGET * size / SIZE)
-	var attempts: int = target * 80
+	var target: int = clampi(maxi(PRIMARY_NODE_TARGET * size / SIZE, size / 10), 12, 96)
+	var attempts: int = target * 120
 	var occupied: Dictionary = {}
 	var collar: int = _collar_cells() + 2
 	if collar >= size / 2:
 		collar = maxi(2, size / 8)
-	var spacing: int = maxi(3, 18 * size / SIZE)
+	var spacing: int = maxi(3, size / 36)
+
+	# Towns claim the spacing budget before wilderness sampling, so the road
+	# backbone is built around occupancy instead of random landmarks.
+	_seed_settlement_nodes(clampi(target * 6 / 10, 2, target), occupied, spacing, rng)
 
 	for _i in attempts:
 		if nodes.size() >= target:
@@ -1068,15 +1293,88 @@ func _seed_nodes() -> void:
 		var az: int = rng.randi_range(collar, size - collar - 1)
 		_try_add_node(ax, az, occupied, spacing, rng)
 
+	# Fill shortfalls with a lattice pass so maps are never node-starved.
+	if nodes.size() < target:
+		var step: int = maxi(spacing, 4)
+		var ax: int = collar + step / 2
+		while ax < size - collar and nodes.size() < target:
+			var az: int = collar + step / 2
+			while az < size - collar and nodes.size() < target:
+				_try_add_node(ax, az, occupied, spacing, rng)
+				az += step
+			ax += step
+
 	# Guarantee a backbone even if random sampling was unlucky on small maps.
 	if nodes.size() < 2:
 		for az in size:
 			for ax in size:
 				if nodes.size() >= maxi(target, 4):
 					break
-				_try_add_node(ax, az, occupied, spacing, rng)
+				_try_add_node(ax, az, occupied, maxi(2, spacing / 2), rng)
 			if nodes.size() >= maxi(target, 4):
 				break
+
+
+func _seed_settlement_nodes(
+	budget: int, occupied: Dictionary, spacing: int, rng: RandomNumberGenerator
+) -> void:
+	var peaks: Array[Vector2i] = _population_peaks()
+	for peak in peaks:
+		if nodes.size() >= budget:
+			break
+		_try_add_node(peak.y % size, peak.y / size, occupied, spacing, rng)
+
+	# Any landmass that carries real occupancy needs a hub, even if the budget
+	# was spent on a denser neighbour.
+	var hosted: Dictionary = {}
+	for node in nodes:
+		if node.kind == AtlasFeatures.NodeKind.SETTLEMENT:
+			hosted[node.landmass] = true
+	for peak in peaks:
+		var idx: int = peak.y
+		var mass: int = landmass_id[idx]
+		if mass >= 0 and hosted.has(mass):
+			continue
+		var before: int = nodes.size()
+		_try_add_node(idx % size, idx / size, occupied, maxi(2, spacing / 2), rng)
+		if nodes.size() > before:
+			hosted[landmass_id[idx]] = true
+
+
+## Local population maxima as (population, cell index), densest first. The index
+## tie-break keeps exactly one peak per flat plateau.
+func _population_peaks() -> Array[Vector2i]:
+	var peaks: Array[Vector2i] = []
+	var radius: int = 2
+	for az in size:
+		for ax in size:
+			var idx: int = index_of(ax, az)
+			var pop: int = AtlasPack.population(cells[idx])
+			if pop < SETTLEMENT_MIN_POP:
+				continue
+			var is_peak: bool = true
+			for dz in range(-radius, radius + 1):
+				for dx in range(-radius, radius + 1):
+					if dx == 0 and dz == 0:
+						continue
+					var nx: int = ax + dx
+					var nz: int = az + dz
+					if not in_bounds(nx, nz):
+						continue
+					var nb: int = index_of(nx, nz)
+					var npop: int = AtlasPack.population(cells[nb])
+					if npop > pop or (npop == pop and nb < idx):
+						is_peak = false
+						break
+				if not is_peak:
+					break
+			if is_peak:
+				peaks.append(Vector2i(pop, idx))
+	peaks.sort_custom(
+		func(a: Vector2i, b: Vector2i) -> bool:
+			return a.x > b.x if a.x != b.x else a.y < b.y
+	)
+	return peaks
 
 
 func _try_add_node(
@@ -1096,7 +1394,10 @@ func _try_add_node(
 		mass = 0
 		landmass_id[idx] = 0
 	var kind: int = AtlasFeatures.NodeKind.LANDMARK
-	if biome == AtlasBiomes.Id.COAST:
+	if AtlasPack.population(cells[idx]) >= SETTLEMENT_MIN_POP:
+		# Occupied cells are towns first; a coastal town is still a town.
+		kind = AtlasFeatures.NodeKind.SETTLEMENT
+	elif biome == AtlasBiomes.Id.COAST:
 		kind = AtlasFeatures.NodeKind.COASTAL_GATE
 	elif _near_lake(ax, az):
 		kind = AtlasFeatures.NodeKind.LAKE_SHORE
@@ -1341,22 +1642,27 @@ func _ensure_river_port(
 	if not river_ports.has(key):
 		river_ports[key] = []
 	var ports: Array = river_ports[key]
-	if ports.size() >= MAX_RIVER_PORTS:
+	# One shared crossing per edge for the drainage tree. Creating a fresh port
+	# on every call made upstream/downstream cells disagree on `t`, which showed
+	# up as broken river segments when zoomed in.
+	if not ports.is_empty():
 		var best: AtlasPort = ports[0]
 		for p in ports:
-			var port: AtlasPort = p
-			if port.feature_class < feature_class:
-				port.feature_class = feature_class
-			if port.feature_class >= best.feature_class:
-				best = port
+			var existing: AtlasPort = p
+			if existing.feature_class < feature_class:
+				existing.feature_class = feature_class
+			if existing.surface_z == 0:
+				existing.surface_z = surface_z
+			if existing.feature_class >= best.feature_class:
+				best = existing
 		return best
 
 	var owner: Vector3i = AtlasFeatures.edge_owner(key)
 	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
-	rng.seed = _layer_seed("edge_r_%d_%d_%d_%d" % [owner.x, owner.y, owner.z, ports.size()])
+	rng.seed = _layer_seed("edge_r_%d_%d_%d_%d" % [owner.x, owner.y, owner.z, serial])
 	var port: AtlasPort = AtlasPort.new()
-	port.id = ports.size()
-	port.t = lerpf(0.2, 0.8, rng.randf())
+	port.id = 0
+	port.t = lerpf(0.28, 0.72, rng.randf())
 	port.kind = AtlasFeatures.Kind.RIVER
 	port.feature_class = feature_class
 	port.flow_sign = 1
@@ -1387,6 +1693,8 @@ func _build_roads(elev_code: PackedByteArray) -> void:
 	if nodes.size() < 2:
 		return
 
+	var river_adjacent: PackedByteArray = _river_adjacency_mask()
+
 	# Group by landmass and connect with a simple nearest-neighbour chain + star
 	# to the mass centroid node, then A* each segment on a coarse step.
 	var by_mass: Dictionary = {}
@@ -1403,16 +1711,17 @@ func _build_roads(elev_code: PackedByteArray) -> void:
 		group.sort_custom(func(a: AtlasGraphNode, b: AtlasGraphNode) -> bool:
 			return a.id < b.id
 		)
-		# Prim MST on Euclidean cell distance.
+		# Prim MST on population-weighted cell distance, so the trunk grows
+		# between towns before it reaches out to wilderness landmarks.
 		var n: int = group.size()
 		var in_tree: PackedByteArray = PackedByteArray()
 		in_tree.resize(n)
-		in_tree[0] = 1
+		in_tree[_densest_node_index(group)] = 1
 		var edges: Array[Vector2i] = []
 		for _k in range(n - 1):
 			var best_i: int = -1
 			var best_j: int = -1
-			var best_d: int = 1 << 30
+			var best_w: float = INF
 			for i in n:
 				if in_tree[i] == 0:
 					continue
@@ -1420,10 +1729,9 @@ func _build_roads(elev_code: PackedByteArray) -> void:
 				for j in n:
 					if in_tree[j] != 0:
 						continue
-					var nj: AtlasGraphNode = group[j]
-					var d: int = absi(ni.ax - nj.ax) + absi(ni.az - nj.az)
-					if d < best_d:
-						best_d = d
+					var w: float = _road_pair_weight(ni, group[j])
+					if w < best_w:
+						best_w = w
 						best_i = i
 						best_j = j
 			if best_j < 0:
@@ -1431,20 +1739,116 @@ func _build_roads(elev_code: PackedByteArray) -> void:
 			in_tree[best_j] = 1
 			edges.append(Vector2i(best_i, best_j))
 
+		var linked: Dictionary = {}
 		for edge in edges:
 			var a: AtlasGraphNode = group[edge.x]
 			var b: AtlasGraphNode = group[edge.y]
-			var path: PackedInt32Array = _road_astar(a.cell, b.cell, elev_code)
-			if path.size() < 2:
-				path = _road_bresenham(a.ax, a.az, b.ax, b.az)
-			if path.size() < 2:
+			if _route_and_stamp_road(
+				a, b, AtlasFeatures.RoadClass.PRIMARY, elev_code, river_adjacent, road_serial
+			):
+				primary_road_edges.append(Vector2i(a.id, b.id))
+				linked["%d:%d" % [mini(a.id, b.id), maxi(a.id, b.id)]] = true
+				road_serial += 1
+
+		# Secondary spurs: each node also reaches its second-nearest neighbour so
+		# the network is denser than a bare MST.
+		for i in n:
+			var ni: AtlasGraphNode = group[i]
+			var best: Array[Vector2] = []
+			for j in n:
+				if i == j:
+					continue
+				best.append(Vector2(_road_pair_weight(ni, group[j]), float(j)))
+			best.sort_custom(func(a: Vector2, b: Vector2) -> bool: return a.x < b.x)
+			# Towns get one extra spur so occupied regions end up denser.
+			var spur_budget: int = (
+				3 if ni.kind == AtlasFeatures.NodeKind.SETTLEMENT else 2
+			)
+			var added: int = 0
+			for cand in best:
+				if added >= spur_budget:
+					break
+				var nj2: AtlasGraphNode = group[int(cand.y)]
+				var key: String = "%d:%d" % [mini(ni.id, nj2.id), maxi(ni.id, nj2.id)]
+				if linked.has(key):
+					continue
+				if _route_and_stamp_road(
+					ni, nj2, AtlasFeatures.RoadClass.SECONDARY, elev_code, river_adjacent,
+					road_serial
+				):
+					linked[key] = true
+					road_serial += 1
+					added += 1
+
+
+## Land cells that border a river channel without being one. Roads follow these
+## valley shoulders instead of sitting in the water.
+func _river_adjacency_mask() -> PackedByteArray:
+	var mask: PackedByteArray = PackedByteArray()
+	mask.resize(size * size)
+	for cell_variant in river_links:
+		var cell: int = int(cell_variant)
+		var cx: int = cell % size
+		var cz: int = cell / size
+		for k in 8:
+			var nx: int = cx + NEIGHBOR_DX[k]
+			var nz: int = cz + NEIGHBOR_DZ[k]
+			if not in_bounds(nx, nz):
 				continue
-			primary_road_edges.append(Vector2i(a.id, b.id))
-			_stamp_road_path(path, AtlasFeatures.RoadClass.PRIMARY, a.id, b.id, road_serial)
-			road_serial += 1
+			var nb: int = index_of(nx, nz)
+			if not river_links.has(nb) and AtlasBiomes.is_land(AtlasPack.biome(cells[nb])):
+				mask[nb] = 1
+	return mask
 
 
-func _road_astar(start: int, goal: int, elev_code: PackedByteArray) -> PackedInt32Array:
+func _densest_node_index(group: Array) -> int:
+	var best: int = 0
+	var best_pop: int = -1
+	for i in group.size():
+		var node: AtlasGraphNode = group[i]
+		var pop: int = AtlasPack.population(cells[node.cell])
+		if pop > best_pop:
+			best_pop = pop
+			best = i
+	return best
+
+
+## Distance discounted by the occupancy of both endpoints, so town-to-town links
+## outrank equally long wilderness links.
+func _road_pair_weight(a: AtlasGraphNode, b: AtlasGraphNode) -> float:
+	var d: float = float(absi(a.ax - b.ax) + absi(a.az - b.az))
+	return d * _road_node_factor(a) * _road_node_factor(b)
+
+
+func _road_node_factor(node: AtlasGraphNode) -> float:
+	var factor: float = lerpf(
+		1.0, 0.72, float(AtlasPack.population(cells[node.cell])) / 15.0
+	)
+	if node.kind == AtlasFeatures.NodeKind.SETTLEMENT:
+		factor *= 0.85
+	return factor
+
+
+func _route_and_stamp_road(
+	a: AtlasGraphNode,
+	b: AtlasGraphNode,
+	road_class: int,
+	elev_code: PackedByteArray,
+	river_adjacent: PackedByteArray,
+	serial: int
+) -> bool:
+	var path: PackedInt32Array = _road_astar(a.cell, b.cell, elev_code, river_adjacent)
+	if path.size() < 2:
+		path = _road_bresenham(a.ax, a.az, b.ax, b.az)
+	if path.size() < 2:
+		return false
+	_stamp_road_path(path, road_class, a.id, b.id, serial)
+	return true
+
+
+func _road_astar(
+	start: int, goal: int, elev_code: PackedByteArray, river_adjacent: PackedByteArray
+) -> PackedInt32Array:
 	# Coarse A* stepping by 1 cell; capped expansions for GDScript budgets.
 	var open: Array[int] = [start]
 	var came: Dictionary = {}
@@ -1484,11 +1888,20 @@ func _road_astar(start: int, goal: int, elev_code: PackedByteArray) -> PackedInt
 			var biome: int = AtlasPack.biome(cells[nb])
 			if biome == AtlasBiomes.Id.OCEAN or biome == AtlasBiomes.Id.LAKE:
 				continue
-			var step: float = 1.0 + float(AtlasPack.relief(cells[nb])) * 0.04
+			# Baseline stays above the Manhattan heuristic so discounts below
+			# never make it inadmissible; 1.0 is the cheapest reachable step.
+			var step: float = 1.45
+			step += float(AtlasPack.relief(cells[nb])) * 0.06
 			step += float(absi(int(elev_code[nb]) - int(elev_code[current]))) * 0.08
+			if biome == AtlasBiomes.Id.ALPINE:
+				step += 0.5
 			if river_links.has(nb):
-				step += 0.35
-			var tentative: float = float(gscore[current]) + step
+				# Parallel the channel rather than occupy it.
+				step += 0.55
+			elif river_adjacent[nb] != 0:
+				step -= 0.2
+			step -= minf(float(AtlasPack.population(cells[nb])) * 0.035, 0.45)
+			var tentative: float = float(gscore[current]) + maxf(step, 1.0)
 			if gscore.has(nb) and tentative >= float(gscore[nb]):
 				continue
 			came[nb] = current
@@ -1542,43 +1955,57 @@ func _stamp_road_path(
 	var feature_id: int = int(hash("%d:road:%d:%d:%d" % [
 		world_seed, node_a, node_b, serial
 	])) & 0x7fffffff
-	for i in range(path.size() - 1):
-		var a: int = path[i]
-		var b: int = path[i + 1]
-		var ax: int = a % size
-		var az: int = a / size
-		var bx: int = b % size
-		var bz: int = b / size
-		var dir: int = _dir_from_delta(bx - ax, bz - az)
-		if dir < 0:
-			continue
-		var surface_z: int = AtlasPack.elevation_to_metres(AtlasPack.elevation(cells[a]))
-		var port: AtlasPort = _ensure_road_port(ax, az, dir, road_class, surface_z)
+	# One link per path cell, from the entry edge/node to the exit edge/node.
+	# The old segment stamp put both endpoints on the same outgoing edge, which
+	# made roads render as tiny stubs instead of continuous corridors.
+	for i in path.size():
+		var cell: int = path[i]
+		var ax: int = cell % size
+		var az: int = cell / size
+		var surface_z: int = AtlasPack.elevation_to_metres(AtlasPack.elevation(cells[cell]))
 		var ea: AtlasEndpoint = AtlasEndpoint.new()
 		var eb: AtlasEndpoint = AtlasEndpoint.new()
 		if i == 0:
 			ea.kind = AtlasFeatures.EndpointKind.NODE
 			ea.ref_id = node_a
 		else:
+			var prev: int = path[i - 1]
+			var back_dir: int = _dir_from_delta(
+				(prev % size) - ax, (prev / size) - az
+			)
+			if back_dir < 0:
+				continue
+			var in_port: AtlasPort = _ensure_road_port(
+				ax, az, back_dir, road_class, surface_z
+			)
 			ea.kind = AtlasFeatures.EndpointKind.EDGE_PORT
-			ea.ref_id = AtlasFeatures.edge_key(ax, az, dir, size)
-			ea.port_id = port.id
-		if i + 1 == path.size() - 1:
+			ea.ref_id = AtlasFeatures.edge_key(ax, az, back_dir, size)
+			ea.port_id = in_port.id
+		if i == path.size() - 1:
 			eb.kind = AtlasFeatures.EndpointKind.NODE
 			eb.ref_id = node_b
 		else:
+			var next_cell: int = path[i + 1]
+			var forward: int = _dir_from_delta(
+				(next_cell % size) - ax, (next_cell / size) - az
+			)
+			if forward < 0:
+				continue
+			var out_port: AtlasPort = _ensure_road_port(
+				ax, az, forward, road_class, surface_z
+			)
 			eb.kind = AtlasFeatures.EndpointKind.EDGE_PORT
-			eb.ref_id = AtlasFeatures.edge_key(ax, az, dir, size)
-			eb.port_id = port.id
+			eb.ref_id = AtlasFeatures.edge_key(ax, az, forward, size)
+			eb.port_id = out_port.id
 		var link: AtlasLink = AtlasLink.new()
 		link.a = ea
 		link.b = eb
 		link.kind = AtlasFeatures.Kind.ROAD
 		link.feature_class = road_class
 		link.feature_id = feature_id
-		if not road_links.has(a):
-			road_links[a] = []
-		road_links[a].append(link)
+		if not road_links.has(cell):
+			road_links[cell] = []
+		road_links[cell].append(link)
 
 
 func _ensure_road_port(
@@ -1588,14 +2015,22 @@ func _ensure_road_port(
 	if not road_ports.has(key):
 		road_ports[key] = []
 	var ports: Array = road_ports[key]
-	if ports.size() >= MAX_ROAD_PORTS:
-		return ports[0]
+	if not ports.is_empty():
+		var best: AtlasPort = ports[0]
+		for p in ports:
+			var existing: AtlasPort = p
+			if existing.feature_class > best.feature_class:
+				best = existing
+			# Prefer keeping the primary class visible when MST and spur share an edge.
+			if road_class < existing.feature_class:
+				existing.feature_class = road_class
+		return best
 	var owner: Vector3i = AtlasFeatures.edge_owner(key)
 	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
-	rng.seed = _layer_seed("edge_p_%d_%d_%d_%d" % [owner.x, owner.y, owner.z, ports.size()])
+	rng.seed = _layer_seed("edge_p_%d_%d_%d_%d" % [owner.x, owner.y, owner.z, 0])
 	var port: AtlasPort = AtlasPort.new()
-	port.id = ports.size()
-	port.t = lerpf(0.25, 0.75, rng.randf())
+	port.id = 0
+	port.t = lerpf(0.3, 0.7, rng.randf())
 	port.kind = AtlasFeatures.Kind.ROAD
 	port.feature_class = road_class
 	port.flow_sign = 0

@@ -23,6 +23,8 @@ func _initialize() -> void:
 	_test_climate_sanity(atlas)
 	_test_edge_ports_shared(atlas)
 	_test_river_and_lake_sanity(atlas)
+	_test_population(atlas)
+	_test_road_coverage(atlas)
 	_test_determinism()
 	print("---")
 	print("%d checks | %d failures" % [checks, failures])
@@ -173,6 +175,236 @@ func _test_river_and_lake_sanity(atlas: ContinentAtlas) -> void:
 		"lakes vary in size",
 		atlas.lakes.size() <= 1 or unique_shapes > 1,
 		"(%d distinct sizes of %d)" % [unique_shapes, atlas.lakes.size()]
+	)
+
+
+func _test_population(atlas: ContinentAtlas) -> void:
+	print("- population")
+	var land: int = 0
+	var occupied: int = 0
+	var water_occupied: int = 0
+	var river_land: int = 0
+	var river_occupied: int = 0
+	var inland_pop_total: int = 0
+	var inland_cells: int = 0
+	# Absolute humidity thresholds do not transfer between seeds, so split the
+	# land on its own terciles before comparing occupancy rates.
+	var humidity_hist: PackedInt32Array = PackedInt32Array()
+	humidity_hist.resize(256)
+	for i in atlas.cells.size():
+		var cell: int = atlas.cells[i]
+		if AtlasBiomes.is_land(AtlasPack.biome(cell)):
+			humidity_hist[AtlasPack.humidity(cell)] += 1
+	var land_total: int = 0
+	for h in 256:
+		land_total += humidity_hist[h]
+	var dry_cut: int = _humidity_percentile(humidity_hist, land_total, 0.33)
+	var wet_cut: int = _humidity_percentile(humidity_hist, land_total, 0.67)
+	var dry_land: int = 0
+	var dry_occupied: int = 0
+	var wet_land: int = 0
+	var wet_occupied: int = 0
+
+	for i in atlas.cells.size():
+		var packed: int = atlas.cells[i]
+		var pop: int = AtlasPack.population(packed)
+		if not AtlasBiomes.is_land(AtlasPack.biome(packed)):
+			if pop > 0:
+				water_occupied += 1
+			continue
+		land += 1
+		if pop > 0:
+			occupied += 1
+		if atlas.river_links.has(i):
+			river_land += 1
+			if pop > 0:
+				river_occupied += 1
+		else:
+			inland_cells += 1
+			inland_pop_total += pop
+		var humidity: int = AtlasPack.humidity(packed)
+		if humidity <= dry_cut:
+			dry_land += 1
+			if pop > 0:
+				dry_occupied += 1
+		elif humidity >= wet_cut:
+			wet_land += 1
+			if pop > 0:
+				wet_occupied += 1
+
+	_check("no population on water", water_occupied == 0, "(%d cells)" % water_occupied)
+	_check("land is populated somewhere", occupied > 0, "(%d cells)" % occupied)
+	var occupied_ratio: float = float(occupied) / maxf(1.0, float(land))
+	_check(
+		"population stays sparse",
+		occupied_ratio < 0.35,
+		"(%.1f%% of %d land cells)" % [100.0 * occupied_ratio, land]
+	)
+
+	var river_rate: float = float(river_occupied) / maxf(1.0, float(river_land))
+	var inland_rate: float = float(occupied - river_occupied) / maxf(
+		1.0, float(land - river_land)
+	)
+	_check(
+		"river corridors are denser than inland",
+		river_land == 0 or river_rate > inland_rate,
+		"(%.1f%% vs %.1f%%)" % [100.0 * river_rate, 100.0 * inland_rate]
+	)
+
+	var dry_rate: float = float(dry_occupied) / maxf(1.0, float(dry_land))
+	var wet_rate: float = float(wet_occupied) / maxf(1.0, float(wet_land))
+	_check(
+		"wet land outpopulates dry land",
+		dry_land == 0 or wet_land == 0 or wet_rate > dry_rate,
+		"(%.1f%% above hum %d vs %.1f%% below hum %d)" % [
+			100.0 * wet_rate, wet_cut, 100.0 * dry_rate, dry_cut
+		]
+	)
+
+	var mouth_cells: int = 0
+	var mouth_pop_total: int = 0
+	for cell_variant in atlas.river_links:
+		var cell: int = int(cell_variant)
+		for link_variant in atlas.river_links[cell]:
+			var link: AtlasLink = link_variant
+			if (
+				link.b.kind == AtlasFeatures.EndpointKind.OCEAN
+				or link.b.kind == AtlasFeatures.EndpointKind.LAKE
+			):
+				mouth_cells += 1
+				mouth_pop_total += AtlasPack.population(atlas.cells[cell])
+				break
+	var mouth_avg: float = float(mouth_pop_total) / maxf(1.0, float(mouth_cells))
+	var inland_avg: float = float(inland_pop_total) / maxf(1.0, float(inland_cells))
+	_check(
+		"river mouths are the population cores",
+		mouth_cells == 0 or mouth_avg > inland_avg * 3.0,
+		"(avg %.1f vs inland %.2f over %d mouths)" % [mouth_avg, inland_avg, mouth_cells]
+	)
+
+	var settlements: int = 0
+	for node in atlas.nodes:
+		if node.kind == AtlasFeatures.NodeKind.SETTLEMENT:
+			settlements += 1
+	_check(
+		"mouths produce settlement nodes",
+		mouth_cells == 0 or settlements > 0,
+		"(%d of %d nodes)" % [settlements, atlas.nodes.size()]
+	)
+
+
+func _humidity_percentile(hist: PackedInt32Array, total: int, fraction: float) -> int:
+	if total <= 0:
+		return 0
+	var wanted: int = int(float(total) * fraction)
+	var seen: int = 0
+	for h in 256:
+		seen += hist[h]
+		if seen >= wanted:
+			return h
+	return 255
+
+
+func _test_road_coverage(atlas: ContinentAtlas) -> void:
+	print("- road coverage")
+	var min_nodes: int = maxi(8, atlas.size / 20)
+	_check(
+		"enough road nodes",
+		atlas.nodes.size() >= min_nodes,
+		"(%d >= %d)" % [atlas.nodes.size(), min_nodes]
+	)
+	_check(
+		"has primary road edges",
+		atlas.primary_road_edges.size() > 0,
+		"(%d)" % atlas.primary_road_edges.size()
+	)
+
+	var by_mass: Dictionary = {}
+	for node in atlas.nodes:
+		if not by_mass.has(node.landmass):
+			by_mass[node.landmass] = 0
+		by_mass[node.landmass] = int(by_mass[node.landmass]) + 1
+	var expected_edges: int = 0
+	for mass in by_mass:
+		var n: int = int(by_mass[mass])
+		if n >= 2:
+			expected_edges += n - 1
+	_check(
+		"primary MST edges present",
+		atlas.primary_road_edges.size() >= expected_edges,
+		"(%d >= %d)" % [atlas.primary_road_edges.size(), expected_edges]
+	)
+
+	var min_road_cells: int = maxi(24, atlas.nodes.size() * 4)
+	_check(
+		"road corridors cover many cells",
+		atlas.road_links.size() >= min_road_cells,
+		"(%d >= %d)" % [atlas.road_links.size(), min_road_cells]
+	)
+
+	var through_cells: int = 0
+	var node_terminal_cells: int = 0
+	for cell_idx in atlas.road_links:
+		for link_variant in atlas.road_links[cell_idx]:
+			var link: AtlasLink = link_variant
+			if link.a.kind == AtlasFeatures.EndpointKind.NODE:
+				node_terminal_cells += 1
+			if link.b.kind == AtlasFeatures.EndpointKind.NODE:
+				node_terminal_cells += 1
+			if (
+				link.a.kind == AtlasFeatures.EndpointKind.EDGE_PORT
+				and link.b.kind == AtlasFeatures.EndpointKind.EDGE_PORT
+				and link.a.ref_id != link.b.ref_id
+			):
+				through_cells += 1
+				break
+	_check(
+		"roads have through-cell links",
+		through_cells >= maxi(8, min_road_cells / 2),
+		"(%d)" % through_cells
+	)
+	_check(
+		"roads reach node terminals",
+		node_terminal_cells >= atlas.nodes.size(),
+		"(%d terminals, %d nodes)" % [node_terminal_cells, atlas.nodes.size()]
+	)
+
+	# Secondary spurs should exist beyond the bare MST on maps with enough nodes.
+	var secondary_cells: int = 0
+	for cell_idx in atlas.road_links:
+		for link_variant in atlas.road_links[cell_idx]:
+			var link2: AtlasLink = link_variant
+			if link2.feature_class == AtlasFeatures.RoadClass.SECONDARY:
+				secondary_cells += 1
+				break
+	_check(
+		"secondary road spurs exist",
+		atlas.nodes.size() < 4 or secondary_cells > 0,
+		"(%d cells)" % secondary_cells
+	)
+
+	# Towns must be on the trunk, not hung off it as leaves.
+	var settlements_per_mass: Dictionary = {}
+	var settlement_ids: Dictionary = {}
+	for node in atlas.nodes:
+		if node.kind != AtlasFeatures.NodeKind.SETTLEMENT:
+			continue
+		settlement_ids[node.id] = true
+		if not settlements_per_mass.has(node.landmass):
+			settlements_per_mass[node.landmass] = 0
+		settlements_per_mass[node.landmass] = int(settlements_per_mass[node.landmass]) + 1
+	var expects_settlement_trunk: bool = false
+	for mass in settlements_per_mass:
+		if int(settlements_per_mass[mass]) >= 2:
+			expects_settlement_trunk = true
+	var settlement_primary: int = 0
+	for edge in atlas.primary_road_edges:
+		if settlement_ids.has(edge.x) and settlement_ids.has(edge.y):
+			settlement_primary += 1
+	_check(
+		"settlements carry the primary network",
+		not expects_settlement_trunk or settlement_primary > 0,
+		"(%d town-to-town primary edges)" % settlement_primary
 	)
 
 

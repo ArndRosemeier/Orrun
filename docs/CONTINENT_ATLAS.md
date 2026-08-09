@@ -99,7 +99,7 @@ offset on that grid.
 | `humidity` | 8 | 0–255 | Climate moisture (not ocean flag) |
 | `biome` | 6 | 0–63 | Landcover id (§4.4) |
 | `relief` | 6 | 0–63 | Ruggedness |
-| `population` | 4 | 0–15 | Coarse occupancy; 0 default in wilderness |
+| `population` | 4 | 0–15 | Coarse occupancy; 0 default in wilderness (§6.4 step 7) |
 
 Fauna is **derived** later from biome + humidity + relief + population. Not stored.
 
@@ -250,18 +250,25 @@ Road link rules:
 3. **Humidity** (boost near ocean; simple rain-shadow optional).
 4. **Atlas lakes** — depressions / seeds → `LAKE` cells + spill.
 5. **Biome classify** (including `COAST`, `LAKE`, `OCEAN`).
-6. **Road nodes** — sparse seeds: coastal gates, lake shores, highland saddles,
-   interior landmarks from hash (population may bias later; nodes exist even when
-   population is 0 so roads have somewhere to go).
-7. **River graph** — major trunks only: flow accumulation on atlas elevation
+6. **River graph** — major trunks only: flow accumulation on atlas elevation
    with ocean+lake sinks → create edge ports where channels cross cell borders →
    wire in-cell links → assign classes.
-8. **Road graph** — least-cost paths between nodes on atlas costs (flat, low
-   relief, prefer non-ocean, mild preference to follow river corridors without
-   sitting in them) → ports + links → classes.
+7. **Population** — sparse land occupancy (0–15) from humidity, river corridors
+   and, strongest of all, river mouths into ocean/lake plus their immediate
+   hinterland. High relief, alpine and arid land is suppressed. Ocean and lake
+   cells are always 0, and most land stays 0; occupancy is peaks, not a field.
+8. **Road nodes** — sparse seeds placed after population so towns own the
+   spacing budget: `SETTLEMENT` on local population maxima (each populated
+   landmass gets at least one), then coastal gates, lake shores, highland
+   saddles and interior landmarks fill the wilderness lattice.
+9. **Road graph** — least-cost paths between nodes on atlas costs (flat, low
+   relief, prefer non-ocean, cheaper through occupied cells and along river
+   shoulders while still penalising the channel itself) → ports + links →
+   classes. The MST and spur weights are discounted by endpoint population, so
+   the trunk grows town to town.
 
-Window bake (when we reach that phase) is step 9 in the larger pipeline, not
-part of atlas generation.
+Window bake (when we reach that phase) comes after all of these in the larger
+pipeline, not as part of atlas generation.
 
 ### 6.5 What each view draws
 
@@ -314,6 +321,11 @@ These are to the atlas what the drainage-surface contract is to chunks.
     (§8.2). Inland `LAKE` surfaces do not use that number.
 12. **Schema stamp.** Atlas carries `schema_version` + parameter hash; mismatches
     fail loud rather than silently mis-read bits.
+13. **Population is sparse land occupancy.** `OCEAN` and `LAKE` cells are always
+    0, the clear majority of land stays 0, river-linked land is denser than
+    inland land, wetter land is denser than drier land, and river mouths average
+    far higher than inland cells. Where mouths exist, at least one `SETTLEMENT`
+    node exists and towns appear on the primary road network.
 
 ---
 
@@ -389,7 +401,7 @@ gameplay yet:
 | `LAKE_SHORE` | Road/river meet atlas lake |
 | `PASS` | Mountain saddle; road bias |
 | `LANDMARK` | Hash-seeded wilderness POI slot |
-| `SETTLEMENT` | Reserved for when population > 0 |
+| `SETTLEMENT` | Seeded on population peaks (river mouths first); road hub |
 | `CLAIM_RESERVED` | Future dungeon/mythic claim — roads/settlements must respect |
 
 If every node is an untyped dot, the first settlement generator will pave a town
@@ -540,8 +552,9 @@ func links_in_cell(ax: int, az: int, kind: int) -> Array
 func validate() -> PackedStringArray  # empty = all invariants hold
 ```
 
-Debug view: `scenes/atlas_viewer.tscn` — biome/elev/humidity/relief planes, river
-and road overlays, node markers; per-cell field labels when zoomed in.
+Debug view: `scenes/atlas_viewer.tscn` — biome/elev/humidity/relief/population
+planes, river and road overlays, node markers (settlements drawn larger);
+per-cell field labels when zoomed in.
 
 ---
 
