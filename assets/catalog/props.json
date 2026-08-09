@@ -1,0 +1,47 @@
+{
+  "comment": "Orrun prop catalog. Meshes are produced by the Asset Lab at C:/Projekte/AssetGenerator (assets/specs -> assets/out/*.glb) and copied here by tools/sync_assets.py. Orrun never edits a .glb; if a mesh is wrong, fix its spec in the Asset Lab and regenerate.",
+  "props": [
+    {
+      "id": "pine_ponderosa_stylized",
+      "source": "pine_ponderosa_stylized.glb",
+      "footprint": 1.6,
+      "max_slope_deg": 30.0,
+      "min_scale": 0.85,
+      "max_scale": 1.5,
+      "avoid_water": 3.0,
+      "clearance_road": 4.0,
+      "biomes": { "plains": 0.1, "forest_hills": 1.0, "rocky_badlands": 0.05, "alpine": 0.35 },
+      "density": 0.55
+    },
+    {
+      "id": "rock_boulder_round",
+      "source": "rock_boulder_round.glb",
+      "footprint": 1.1,
+      "max_slope_deg": 42.0,
+      "min_scale": 0.6,
+      "max_scale": 2.2,
+      "avoid_water": 0.5,
+      "clearance_road": 3.0,
+      "biomes": { "plains": 0.12, "forest_hills": 0.3, "rocky_badlands": 1.0, "alpine": 0.8 },
+      "density": 0.3
+    },
+    {
+      "id": "rock_slab_veined",
+      "source": "rock_slab_veined.glb",
+      "footprint": 1.4,
+      "max_slope_deg": 38.0,
+      "min_scale": 0.7,
+      "max_scale": 1.8,
+      "avoid_water": 0.5,
+      "clearance_road": 3.0,
+      "biomes": { "plains": 0.05, "forest_hills": 0.15, "rocky_badlands": 0.85, "alpine": 0.55 },
+      "density": 0.2
+    }
+  ],
+  "wanted_from_asset_lab": [
+    "cliff_face and talus variants for badlands and alpine",
+    "arch / overhang kits to dress natural overhangs",
+    "broadleaf and shrub species so plains and forest read differently",
+    "modular bridge spans (timber short, stone medium) with abutment pieces"
+  ]
+}
