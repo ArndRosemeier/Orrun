@@ -142,9 +142,67 @@ func fill_window(
 	var window: Rect2 = Rect2(
 		origin.x - radius, origin.y - radius, span + radius * 2.0, span + radius * 2.0
 	)
-	var bins: Array[PackedInt32Array] = _bin_rivers(
-		corridors.rivers_in_rect(window), origin, span, radius
-	)
+	var river_bases: PackedInt32Array = corridors.rivers_in_rect(window)
+
+	if ClassDB.class_exists("OrrunGen"):
+		var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
+		var params: Dictionary = {
+			"origin_x": origin_cell.x,
+			"origin_z": origin_cell.y,
+			"cells": cells,
+			"macro_cell_size": cs,
+			"atlas_size": fields.size,
+			"continent_span": _continent_span,
+			"max_valley_radius": radius,
+			"trunk_valley_radius": config.trunk_valley_radius,
+			"trunk_valley_per_class": config.trunk_valley_per_class,
+			"trunk_bank_rise": config.trunk_bank_rise,
+			"swell_height": config.swell_height,
+			"mountain_detail": config.mountain_detail,
+			"warp_strength": config.warp_strength,
+			"ocean_floor_margin": config.ocean_floor_margin,
+			"inland_freeboard": config.inland_freeboard,
+			"relief_amp_plains": config.relief_amp_plains,
+			"relief_amp_hills": config.relief_amp_hills,
+			"relief_amp_mountains": config.relief_amp_mountains,
+			"seed_swell": config.layer_seed("swell"),
+			"seed_mountain": config.layer_seed("mountain"),
+			"seed_warp_a": config.layer_seed("warp_a"),
+			"seed_warp_b": config.layer_seed("warp_b"),
+			"seed_moisture": config.layer_seed("moisture"),
+			"seed_temperature": config.layer_seed("temperature"),
+			"seed_coast": config.layer_seed("coast"),
+			"swell_scale": config.swell_scale,
+			"mountain_noise_scale": config.mountain_noise_scale,
+			"warp_scale": config.warp_scale,
+		}
+		var result: Variant = native.call(
+			"fill_window",
+			fields.elevation_m,
+			fields.humidity01,
+			fields.relief01,
+			fields.water_flag,
+			fields.water_plane,
+			corridors.rivers,
+			river_bases,
+			params
+		)
+		if typeof(result) == TYPE_DICTIONARY:
+			var dict: Dictionary = result
+			var elev_src: PackedFloat32Array = dict["elevation"]
+			var rel_src: PackedFloat32Array = dict["relief_amp"]
+			var moist_src: PackedFloat32Array = dict["moisture"]
+			var temp_src: PackedFloat32Array = dict["temperature"]
+			var count: int = cells * cells
+			for i in count:
+				elevation[i] = elev_src[i]
+				relief_amp[i] = rel_src[i]
+				moisture[i] = moist_src[i]
+				temperature[i] = temp_src[i]
+			return
+		push_error("OrrunGen.fill_window failed: %s" % [result])
+
+	var bins: Array[PackedInt32Array] = _bin_rivers(river_bases, origin, span, radius)
 
 	for cz in cells:
 		var wz: float = (float(origin_cell.y + cz) + 0.5) * cs

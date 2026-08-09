@@ -1,0 +1,17 @@
+[package]
+name = "orrun_gen"
+version = "0.1.0"
+edition = "2021"
+description = "Native generation kernels for Orrun (priority flood, later atlas/sector)."
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+fastnoise-lite = "1.1.1"
+godot = { version = "0.5.5", features = ["api-4-5", "experimental-threads"] }
+
+[profile.release]
+lto = true
+codegen-units = 1

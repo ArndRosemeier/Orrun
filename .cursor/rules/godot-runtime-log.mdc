@@ -1,0 +1,15 @@
+---
+description: Read project Godot error log when debugging runtime/script failures
+alwaysApply: true
+---
+
+# Godot runtime errors
+
+On-screen script-error dialogs are dismissed by the user and are not visible to the agent.
+
+**Always check** these files in the project root when debugging a play session:
+
+1. `logs/godot_runtime.log` — script/engine errors via the `AgentLog` autoload (`SCRIPT` / `ERROR` / `WARNING` / `SHADER`). Prefer this for debugger popups.
+2. `logs/godot_engine.log` — full Godot `--log-file` output from `start.bat` (stdout/stderr).
+
+`godot_runtime.log` is truncated at each launch (session header), then appended. If it is missing, the game did not reach autoloads or was not run from this project — ask the user to relaunch (ideally via `start.bat`) and re-check.

@@ -132,6 +132,12 @@ func _maybe_rebase() -> void:
 		floorf(world_pos.x / snap) * snap, 0.0, floorf(world_pos.z / snap) * snap
 	)
 	WorldOrigin.rebase_to(new_offset)
+	refresh_origin_transforms()
+
+
+## Re-place every chunk (and the far backdrop) after an external origin rebase,
+## e.g. a map teleport that jumped farther than the usual walk-driven snap.
+func refresh_origin_transforms() -> void:
 	for key in _chunks:
 		var node: ChunkNode = _chunks[key]
 		node.refresh_transform()

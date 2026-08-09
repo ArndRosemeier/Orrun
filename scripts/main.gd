@@ -20,6 +20,7 @@ const WATER_SHADER: String = "res://shaders/water.gdshader"
 @onready var player: PlayerController = $Player
 @onready var debug_hud: Control = $UI/DebugHud
 @onready var hydro_map: Control = $UI/HydroMap
+@onready var world_map: Control = $UI/WorldMap
 @onready var loading_label: Label = $UI/Loading
 
 var config: WorldConfig
@@ -28,6 +29,9 @@ var sectors: SectorManager
 var spawn_sector: WorldSector
 
 var _bake_task: int = -1
+## 0 = idle, 1 = atlas worker, 2 = spawn-sector worker.
+var _bake_phase: int = 0
+var _baked_atlas: ContinentAtlas = null
 var _spawn_world: Vector3 = Vector3.ZERO
 var _spawn_pending: bool = false
 var _terrain_material: ShaderMaterial
@@ -45,11 +49,22 @@ func _ready() -> void:
 	_water_material = ShaderMaterial.new()
 	_water_material.shader = load(WATER_SHADER)
 
+	if ClassDB.class_exists("OrrunGen"):
+		var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
+		print("OrrunGen: %s" % [native.call("version")])
+	else:
+		push_warning("OrrunGen missing — sector flood uses GDScript fallback")
+
 	loading_label.text = "Charting %d km of continent..." % config.atlas_size
-	_bake_task = WorkerThreadPool.add_task(_bake)
+	# Atlas generation stays on a worker. Typed class_name factories such as
+	# WorldContext.create must run on the main thread — worker calls can fail
+	# with "Invalid type in function 'create'" (sibling RefCounted misread).
+	# AgentLog records that class of failure in logs/godot_runtime.log.
+	_bake_phase = 1
+	_bake_task = WorkerThreadPool.add_task(_bake_atlas)
 
 
-func _bake() -> void:
+func _bake_atlas() -> void:
 	var atlas: ContinentAtlas = ContinentAtlas.generate(config.seed, config.atlas_size)
 	var errors: PackedStringArray = atlas.validate()
 	if not errors.is_empty():
@@ -57,8 +72,19 @@ func _bake() -> void:
 		# stop the boot, not quietly produce a world with impossible rivers.
 		_boot_error = "Atlas failed validation: %s" % [errors]
 		return
-	context = WorldContext.create(config, atlas)
+	_baked_atlas = atlas
 
+
+func _complete_boot_from_atlas() -> void:
+	loading_label.text = "Building continental terrain..."
+	context = WorldContext.create(config, _baked_atlas)
+	_baked_atlas = null
+	loading_label.text = "Baking the river mouth..."
+	_bake_phase = 2
+	_bake_task = WorkerThreadPool.add_task(_bake_spawn_sector)
+
+
+func _bake_spawn_sector() -> void:
 	var mouths: Array[Dictionary] = WorldQuery.ranked_river_mouths(context)
 	if mouths.is_empty():
 		_boot_error = "Atlas produced no river mouths to open on"
@@ -89,8 +115,16 @@ func _process(_delta: float) -> void:
 		if not _boot_error.is_empty():
 			loading_label.text = _boot_error
 			push_error(_boot_error)
+			_bake_phase = 0
 			return
-		_on_world_ready()
+		if _bake_phase == 1:
+			_complete_boot_from_atlas()
+			return
+		if _bake_phase == 2:
+			_bake_phase = 0
+			_on_world_ready()
+			return
+		_bake_phase = 0
 		return
 	if _spawn_pending:
 		_try_spawn()
@@ -126,6 +160,8 @@ func _on_world_ready() -> void:
 		context, sectors, player, specs, _terrain_material, _water_material
 	)
 	hydro_map.build(sectors, player)
+	world_map.setup_for_game(context.atlas, player)
+	world_map.teleport_requested.connect(_teleport_to_map)
 	debug_hud.bind(streamer, sectors, player)
 	debug_hud.visible = true
 
@@ -155,11 +191,65 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("debug_hud"):
 		debug_hud.visible = not debug_hud.visible
 	elif event.is_action_pressed("debug_map"):
-		hydro_map.visible = not hydro_map.visible
+		_toggle_world_map()
 	elif event.is_action_pressed("debug_epsilon"):
 		set_terrain_debug_view(
 			(int(_terrain_material.get_shader_parameter("debug_view")) + 1) % 4
 		)
+
+
+func _toggle_world_map() -> void:
+	world_map.visible = not world_map.visible
+	hydro_map.visible = not world_map.visible
+	if world_map.visible:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		# Size is final next frame; centre on the player then.
+		call_deferred("_focus_world_map_on_player")
+	else:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+func _focus_world_map_on_player() -> void:
+	if not world_map.visible:
+		return
+	var world_pos: Vector3 = WorldOrigin.to_world(player.global_position)
+	world_map.focus_world_xz(Vector2(world_pos.x, world_pos.z))
+	world_map.grab_focus()
+
+
+## Drop the player on a world-map click. Reuses the spawn wait so they land on
+## real collision once the streamer has caught up.
+func _teleport_to_map(world_xz: Vector2) -> void:
+	if context == null or streamer == null:
+		return
+	var span: float = context.config.continent_metres()
+	if (
+		world_xz.x < 0.0 or world_xz.y < 0.0
+		or world_xz.x >= span or world_xz.y >= span
+	):
+		print("teleport rejected: outside atlas (%.0f, %.0f)" % [world_xz.x, world_xz.y])
+		return
+	var ground: float = context.sampler().height_at(world_xz.x, world_xz.y)
+	_spawn_world = Vector3(world_xz.x, ground, world_xz.y)
+	WorldOrigin.rebase_to(Vector3(world_xz.x, 0.0, world_xz.y))
+	streamer.refresh_origin_transforms()
+	player.frozen = true
+	player.velocity = Vector3.ZERO
+	player.global_position = WorldOrigin.to_scene(
+		_spawn_world + Vector3(0.0, 60.0, 0.0)
+	)
+	sectors.request_around(WorldCoords.sector_of(world_xz.x, world_xz.y))
+	_spawn_pending = true
+	loading_label.visible = true
+	loading_label.text = "Travelling..."
+	world_map.visible = false
+	hydro_map.visible = true
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	print(
+		"teleport map -> %.0f, %.0f (sector %s)" % [
+			world_xz.x, world_xz.y, WorldCoords.sector_of(world_xz.x, world_xz.y)
+		]
+	)
 
 
 func set_terrain_debug_view(view: int) -> void:

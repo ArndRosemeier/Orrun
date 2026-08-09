@@ -1,7 +1,8 @@
 @echo off
 REM Orrun - procedural fantasy wilderness.
 REM WASD move, mouse look, Space jump, Shift sprint, F toggle fly,
-REM H debug HUD, M hydro map, 1-3 terrain debug views, Esc release mouse.
+REM H debug HUD, M world map, 1-3 terrain debug views, Esc release mouse.
+REM Script errors are mirrored to logs\godot_runtime.log (also via AgentLog).
 
 setlocal
 cd /d "%~dp0"
@@ -30,7 +31,11 @@ if not exist "%ROOT%\project.godot" (
     exit /b 1
 )
 
+if not exist "%ROOT%\logs" mkdir "%ROOT%\logs"
+
 echo Starting Orrun with:
 echo   %GODOT%
-"%GODOT%" --path "%ROOT%" %*
+echo   script errors -^> %ROOT%\logs\godot_runtime.log
+echo   engine log    -^> %ROOT%\logs\godot_engine.log
+"%GODOT%" --path "%ROOT%" --log-file "%ROOT%\logs\godot_engine.log" %*
 endlocal

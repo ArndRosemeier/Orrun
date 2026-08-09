@@ -53,6 +53,9 @@ var road_links: Dictionary = {}
 var river_receiver: PackedInt32Array = PackedInt32Array()
 
 var generate_ms: int = 0
+## Scratch while [_build_roads] runs; not part of the published atlas.
+var _road_channel_mask: PackedByteArray = PackedByteArray()
+var _road_native: RefCounted = null
 
 
 static func generate(p_world_seed: int, p_size: int = SIZE) -> ContinentAtlas:
@@ -517,6 +520,47 @@ func _build_landmask_elevation(
 	humidity: PackedByteArray,
 	relief: PackedByteArray
 ) -> void:
+	if ClassDB.class_exists("OrrunGen"):
+		var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
+		var params: Dictionary = {
+			"size": size,
+			"seed_continent": _layer_seed("atlas_continent"),
+			"seed_coast_cut": _layer_seed("atlas_coast_cut"),
+			"seed_peninsula": _layer_seed("atlas_peninsula"),
+			"seed_mountain": _layer_seed("atlas_mountain"),
+			"seed_moist": _layer_seed("atlas_moist"),
+			"seed_relief": _layer_seed("atlas_relief"),
+			"seed_warp": _layer_seed("atlas_warp"),
+			"seed_warp2": _layer_seed("atlas_warp2"),
+		}
+		var result: Variant = native.call("atlas_landmask", params)
+		if typeof(result) == TYPE_DICTIONARY:
+			var dict: Dictionary = result
+			var land_src: PackedByteArray = dict["land"]
+			var elev_src: PackedByteArray = dict["elev_code"]
+			var hum_src: PackedByteArray = dict["humidity"]
+			var rel_src: PackedByteArray = dict["relief"]
+			var count: int = size * size
+			if (
+				land_src.size() != count
+				or elev_src.size() != count
+				or hum_src.size() != count
+				or rel_src.size() != count
+			):
+				push_error(
+					"OrrunGen.atlas_landmask size mismatch: got %d want %d"
+					% [land_src.size(), count]
+				)
+			else:
+				for i in count:
+					land[i] = land_src[i]
+					elev_code[i] = elev_src[i]
+					humidity[i] = hum_src[i]
+					relief[i] = rel_src[i]
+				return
+		else:
+			push_error("OrrunGen.atlas_landmask failed: %s" % [result])
+
 	var continent: FastNoiseLite = _make_noise(
 		"atlas_continent", 0.0024, FastNoiseLite.FRACTAL_FBM, 6
 	)
@@ -1694,6 +1738,15 @@ func _build_roads(elev_code: PackedByteArray) -> void:
 		return
 
 	var river_adjacent: PackedByteArray = _river_adjacency_mask()
+	_road_channel_mask = PackedByteArray()
+	_road_channel_mask.resize(size * size)
+	for cell_variant in river_links:
+		_road_channel_mask[int(cell_variant)] = 1
+	_road_native = (
+		ClassDB.instantiate("OrrunGen") as RefCounted
+		if ClassDB.class_exists("OrrunGen")
+		else null
+	)
 
 	# Group by landmass and connect with a simple nearest-neighbour chain + star
 	# to the mass centroid node, then A* each segment on a coarse step.
@@ -1779,6 +1832,8 @@ func _build_roads(elev_code: PackedByteArray) -> void:
 					linked[key] = true
 					road_serial += 1
 					added += 1
+	_road_channel_mask = PackedByteArray()
+	_road_native = null
 
 
 ## Land cells that border a river channel without being one. Roads follow these
@@ -1849,6 +1904,24 @@ func _route_and_stamp_road(
 func _road_astar(
 	start: int, goal: int, elev_code: PackedByteArray, river_adjacent: PackedByteArray
 ) -> PackedInt32Array:
+	if _road_native != null:
+		var path: Variant = _road_native.call(
+			"road_astar",
+			cells,
+			elev_code,
+			river_adjacent,
+			_road_channel_mask,
+			size,
+			start,
+			goal,
+			AtlasBiomes.Id.OCEAN,
+			AtlasBiomes.Id.LAKE,
+			AtlasBiomes.Id.ALPINE
+		)
+		if typeof(path) == TYPE_PACKED_INT32_ARRAY:
+			return path
+		push_error("OrrunGen.road_astar failed: %s" % [path])
+
 	# Coarse A* stepping by 1 cell; capped expansions for GDScript budgets.
 	var open: Array[int] = [start]
 	var came: Dictionary = {}

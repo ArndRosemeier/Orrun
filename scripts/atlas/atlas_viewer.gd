@@ -3,8 +3,12 @@ extends Control
 ##
 ## Drag with left mouse to pan, wheel to zoom. When a cell is large enough on
 ## screen, its climate fields and local feature counts are drawn as text so the
-## generator can be judged cell by cell. This view is also the seed of a future
-## player-facing map.
+## generator can be judged cell by cell.
+##
+## In the standalone atlas tool, right-click cycles colour modes. In the game
+## ([member game_mode]), right-click teleports; press B to cycle colour modes.
+
+signal teleport_requested(world_xz: Vector2)
 
 const MIN_ZOOM: float = 0.15
 ## Deep zoom so a single kilometre cell can fill enough pixels for field text.
@@ -16,6 +20,9 @@ static var VIEW_MODE_NAMES: PackedStringArray = PackedStringArray([
 ])
 
 var atlas: ContinentAtlas
+## When true: right-click teleports, player marker is drawn, B cycles modes.
+var game_mode: bool = false
+var player: Node3D
 
 var _zoom: float = 1.0
 var _pan: Vector2 = Vector2.ZERO
@@ -42,14 +49,41 @@ func setup(p_atlas: ContinentAtlas) -> void:
 	queue_redraw()
 
 
-func _ready() -> void:
+## In-game world map: full atlas, teleport on right-click.
+func setup_for_game(p_atlas: ContinentAtlas, player_node: Node3D) -> void:
+	game_mode = true
+	player = player_node
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	focus_mode = Control.FOCUS_ALL
+	visible = false
+	setup(p_atlas)
+
+
+## Centre the view on a continental XZ (used when opening the map on the player).
+## Zooms to about forty kilometres across so neighbouring regions are reachable
+## without starting at a postage-stamp continent.
+func focus_world_xz(world_xz: Vector2) -> void:
+	if atlas == null or size.x < 1.0:
+		return
+	_zoom = clampf(mini(size.x, size.y) / 40.0, MIN_ZOOM, MAX_ZOOM)
+	var cell: Vector2 = world_xz / ContinentAtlas.CELL_METRES
+	_pan = size * 0.5 - cell * _zoom
+	queue_redraw()
+
+
+func _ready() -> void:
+	if not game_mode:
+		mouse_filter = Control.MOUSE_FILTER_STOP
+		focus_mode = Control.FOCUS_ALL
 
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_RESIZED and atlas != null:
 		queue_redraw()
+	elif what == NOTIFICATION_VISIBILITY_CHANGED and game_mode:
+		mouse_filter = (
+			Control.MOUSE_FILTER_STOP if visible else Control.MOUSE_FILTER_IGNORE
+		)
 
 
 func _gui_input(event: InputEvent) -> void:
@@ -69,9 +103,13 @@ func _gui_input(event: InputEvent) -> void:
 		elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN and mb.pressed:
 			_zoom_at(mb.position, 1.0 / 1.15)
 		elif mb.button_index == MOUSE_BUTTON_RIGHT and mb.pressed:
-			_view_mode = (_view_mode + 1) % VIEW_MODE_NAMES.size()
-			_texture = ImageTexture.create_from_image(_render_overview())
-			queue_redraw()
+			if game_mode:
+				var cell: Vector2i = _screen_to_cell(mb.position)
+				if cell.x >= 0:
+					teleport_requested.emit(atlas.continental_centre(cell.x, cell.y))
+					accept_event()
+			else:
+				_cycle_view_mode()
 	elif event is InputEventMouseMotion:
 		var mm: InputEventMouseMotion = event
 		_hover = _screen_to_cell(mm.position)
@@ -84,11 +122,19 @@ func _gui_input(event: InputEvent) -> void:
 			_view_mode = 0
 			_texture = ImageTexture.create_from_image(_render_overview())
 			queue_redraw()
+		elif key.keycode == KEY_B and game_mode:
+			_cycle_view_mode()
 		elif key.keycode == KEY_F:
 			var fit: float = mini(size.x, size.y) / float(maxi(atlas.size, 1))
 			_zoom = clampf(fit * 0.92, MIN_ZOOM, MAX_ZOOM)
 			_pan = Vector2.ZERO
 			queue_redraw()
+
+
+func _cycle_view_mode() -> void:
+	_view_mode = (_view_mode + 1) % VIEW_MODE_NAMES.size()
+	_texture = ImageTexture.create_from_image(_render_overview())
+	queue_redraw()
 
 
 func _zoom_at(screen: Vector2, factor: float) -> void:
@@ -125,14 +171,35 @@ func _draw() -> void:
 		_draw_cell_details()
 	_draw_feature_overlays()
 
+	if game_mode and player != null:
+		var origin: Node = get_tree().root.get_node_or_null("WorldOrigin")
+		if origin != null:
+			var world_pos: Vector3 = origin.call(
+				"to_world", player.global_position
+			) as Vector3
+			var player_cell: Vector2 = (
+				Vector2(world_pos.x, world_pos.z) / ContinentAtlas.CELL_METRES
+			)
+			var marker: Vector2 = _pan + player_cell * _zoom
+			draw_circle(marker, maxf(5.0, _zoom * 0.35), Color(1.0, 0.2, 0.15, 0.95))
+			draw_circle(marker, maxf(2.0, _zoom * 0.15), Color.WHITE)
+
 	# HUD
 	var mode_name: String = VIEW_MODE_NAMES[_view_mode]
 	draw_rect(Rect2(0, 0, size.x, 44), Color(0, 0, 0, 0.55))
+	var help: String
+	if game_mode:
+		help = (
+			"World map  |  %s  |  zoom %.1f  |  drag pan  |  wheel zoom  |  right-click teleport  |  B (%s)  |  F fit  |  M close"
+			% [_status, _zoom, mode_name]
+		)
+	else:
+		help = (
+			"Atlas viewer  |  %s  |  zoom %.1f px/cell  |  right-click (%s)  |  F fit  |  zoom in for cell text"
+			% [_status, _zoom, mode_name]
+		)
 	draw_string(
-		ThemeDB.fallback_font, Vector2(12, 18),
-		"Atlas viewer  |  %s  |  zoom %.1f px/cell  |  right-click (%s)  |  F fit  |  zoom in for cell text" % [
-			_status, _zoom, mode_name
-		],
+		ThemeDB.fallback_font, Vector2(12, 18), help,
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(0.9, 0.92, 0.95)
 	)
 	if _hover.x >= 0:

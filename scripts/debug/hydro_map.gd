@@ -1,13 +1,9 @@
 extends Control
-## Top-down view of the sector under the player: relief, drainage, lakes, roads.
+## Always-on sector minimap: relief, drainage, lakes and roads under the player.
 ##
-## This is the first thing to look at when the landscape feels wrong. If the
-## drainage does not read as believable here, no amount of 3D detail will save
-## it, so this view exists before any of the prettier ones.
-##
-## It draws the whole baked window, halo included, with the published 8 km core
-## outlined. Seams are easiest to spot exactly there: a trunk river or road that
-## bends as it crosses the outline is a contract failure, not a rendering one.
+## This is the bake underfoot, not the continent. Open the world map (M) to see
+## the whole atlas and teleport. The minimap only redraws when the player
+## crosses into a new sector.
 
 var sectors: SectorManager
 var player: Node3D
@@ -22,7 +18,8 @@ var _side: float = 1.0
 func build(sector_manager: SectorManager, player_node: Node3D) -> void:
 	sectors = sector_manager
 	player = player_node
-	visible = false
+	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	visible = true
 
 
 func _refresh() -> void:
@@ -52,7 +49,6 @@ func _render_sector(sector: WorldSector) -> Image:
 			var height: float = sector.terrain.elevation[index]
 			var t: float = (height - low) / span
 
-			# Cheap hillshade so ridges and valleys are legible.
 			var left: float = sector.terrain.elevation[
 				sector.terrain.clamped_index(cx - 1, cz)
 			]
@@ -69,7 +65,6 @@ func _render_sector(sector: WorldSector) -> Image:
 			color *= shade
 
 			if sector.hydro.atlas_water[index] != 0:
-				# Sea and atlas lakes: continental authority, not solved here.
 				color = Color(0.08, 0.20, 0.38)
 			var lake: int = sector.hydro.lake_id[index]
 			if lake >= 0:
@@ -112,8 +107,10 @@ func _draw_roads(image: Image) -> void:
 
 	for site in _sector.paths.bridges:
 		var center: Vector3 = site.center()
-		_dot(image, Vector2(center.x, center.z),
-			Color(0.95, 0.45, 0.25) if not site.is_ford else Color(0.55, 0.85, 0.95), 2)
+		_dot(
+			image, Vector2(center.x, center.z),
+			Color(0.95, 0.45, 0.25) if not site.is_ford else Color(0.55, 0.85, 0.95), 2
+		)
 
 
 func _draw_claims(image: Image) -> void:
@@ -126,8 +123,7 @@ func _draw_claims(image: Image) -> void:
 
 
 func _to_pixel(world_x: float, world_z: float) -> Vector2i:
-	var cell: Vector2i = _sector.terrain.local_cell_of(world_x, world_z)
-	return cell
+	return _sector.terrain.local_cell_of(world_x, world_z)
 
 
 func _line(image: Image, a: Vector3, b: Vector3, color: Color, thickness: int) -> void:
@@ -158,17 +154,19 @@ func _dot_pixel(image: Image, p: Vector2i, color: Color, radius: int) -> void:
 
 
 func _draw() -> void:
-	if _texture == null:
+	if _texture == null or _sector == null:
 		return
-	_side = minf(size.x, size.y) - 40.0
+	var pad: float = 8.0
+	_side = minf(size.x, size.y) - pad * 2.0
 	_origin = Vector2((size.x - _side) * 0.5, (size.y - _side) * 0.5)
 	var pixels: float = float(_sector.terrain.cells)
 
-	draw_rect(Rect2(_origin - Vector2.ONE * 6.0, Vector2.ONE * (_side + 12.0)),
-		Color(0.05, 0.05, 0.07, 0.88))
+	draw_rect(
+		Rect2(_origin - Vector2.ONE * 4.0, Vector2.ONE * (_side + 8.0)),
+		Color(0.05, 0.05, 0.07, 0.82)
+	)
 	draw_texture_rect(_texture, Rect2(_origin, Vector2.ONE * _side), false)
 
-	# The published core: everything outside it is halo the player never sees.
 	var core_scale: float = _side / pixels
 	draw_rect(
 		Rect2(
@@ -184,16 +182,14 @@ func _draw() -> void:
 			_sector.terrain.local_cell_of(world_pos.x, world_pos.z)
 		)
 		var marker: Vector2 = _origin + cell * core_scale
-		draw_circle(marker, 5.0, Color(1.0, 0.25, 0.2))
-		draw_circle(marker, 2.0, Color.WHITE)
+		draw_circle(marker, 4.0, Color(1.0, 0.25, 0.2))
+		draw_circle(marker, 1.8, Color.WHITE)
 
 	draw_string(
 		ThemeDB.fallback_font,
-		_origin + Vector2(0.0, -12.0),
-		"Sector %d,%d  -  cyan: atlas trunks  -  blue: local water  -  box: published core" % [
-			_drawn_sector.x, _drawn_sector.y
-		],
-		HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.85, 0.85, 0.9)
+		_origin + Vector2(2.0, _side + 12.0),
+		"%d,%d  M: world" % [_drawn_sector.x, _drawn_sector.y],
+		HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.85, 0.85, 0.9)
 	)
 
 

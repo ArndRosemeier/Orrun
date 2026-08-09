@@ -2,6 +2,10 @@
 .godot/
 *.translation
 
+# Runtime logs (AgentLog / --log-file); keep the folder.
+logs/*
+!logs/.gitkeep
+
 # Import leftovers / OS
 .import/
 export.cfg
@@ -28,6 +32,9 @@ dist/
 *.exe
 *.pck
 *.zip
+
+# Rust (GDExtension sources under native/; ship the built DLL in addons/)
+native/**/target/
 
 # Python tooling scratch
 __pycache__/

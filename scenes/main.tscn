@@ -1,10 +1,11 @@
-[gd_scene load_steps=10 format=3]
+[gd_scene load_steps=11 format=3]
 
 [ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
 [ext_resource type="Script" path="res://scripts/world/streamer.gd" id="2_streamer"]
 [ext_resource type="Script" path="res://scripts/player/player_controller.gd" id="3_player"]
 [ext_resource type="Script" path="res://scripts/debug/debug_hud.gd" id="4_hud"]
 [ext_resource type="Script" path="res://scripts/debug/hydro_map.gd" id="5_map"]
+[ext_resource type="Script" path="res://scripts/atlas/atlas_viewer.gd" id="6_world_map"]
 
 [sub_resource type="ProceduralSkyMaterial" id="Sky_1"]
 sky_top_color = Color(0.35, 0.52, 0.78, 1)
@@ -93,12 +94,29 @@ mouse_filter = 2
 script = ExtResource("4_hud")
 
 [node name="HydroMap" type="Control" parent="UI"]
+anchors_preset = 3
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -248.0
+offset_top = -268.0
+offset_right = -12.0
+offset_bottom = -12.0
+grow_horizontal = 0
+grow_vertical = 0
+mouse_filter = 2
+script = ExtResource("5_map")
+
+[node name="WorldMap" type="Control" parent="UI"]
 visible = false
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
 mouse_filter = 2
-script = ExtResource("5_map")
+script = ExtResource("6_world_map")
 
 [node name="Loading" type="Label" parent="UI"]
 anchors_preset = 8

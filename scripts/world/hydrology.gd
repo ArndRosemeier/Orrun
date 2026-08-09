@@ -205,6 +205,38 @@ func _priority_flood() -> void:
 	var count: int = n * n
 	var elevation: PackedFloat32Array = terrain.elevation
 
+	# Typed sinks for the native path (atlas water / trunk). Edge + outflow ports
+	# are still seeded inside OrrunGen.priority_flood / the GDScript fallback.
+	var sink_mask: PackedByteArray = PackedByteArray()
+	sink_mask.resize(count)
+	for i in count:
+		sink_mask[i] = 1 if _is_sink(i) else 0
+	var outflow_cells: PackedInt32Array = PackedInt32Array()
+	for port in outflow_ports:
+		var cell: Vector2i = terrain.local_cell_of(port.position.x, port.position.y)
+		if terrain.contains_local(cell.x, cell.y):
+			outflow_cells.append(cell.y * n + cell.x)
+
+	if ClassDB.class_exists("OrrunGen"):
+		var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
+		var result: Variant = native.call(
+			"priority_flood",
+			elevation,
+			sink_mask,
+			outflow_cells,
+			n,
+			terrain.min_elevation,
+			terrain.max_elevation,
+			LEVEL_STEP
+		)
+		if typeof(result) == TYPE_DICTIONARY:
+			var dict: Dictionary = result
+			filled = dict["filled"]
+			receiver = dict["receiver"]
+			flow_order = dict["flow_order"]
+			return
+		push_error("OrrunGen.priority_flood failed: %s" % [result])
+
 	filled = PackedFloat32Array()
 	filled.resize(count)
 	receiver = PackedInt32Array()
@@ -231,12 +263,10 @@ func _priority_flood() -> void:
 		for cx in n:
 			var index: int = cz * n + cx
 			var edge: bool = cx == 0 or cz == 0 or cx == n - 1 or cz == n - 1
-			if edge or _is_sink(index):
+			if edge or sink_mask[index] != 0:
 				_seed(buckets, visited, elevation, index, base, levels)
-	for port in outflow_ports:
-		var cell: Vector2i = terrain.local_cell_of(port.position.x, port.position.y)
-		if terrain.contains_local(cell.x, cell.y):
-			_seed(buckets, visited, elevation, cell.y * n + cell.x, base, levels)
+	for index in outflow_cells:
+		_seed(buckets, visited, elevation, index, base, levels)
 
 	var level: int = 0
 	var popped: int = 0
@@ -292,19 +322,32 @@ func _seed(
 func _accumulate() -> void:
 	var count: int = filled.size()
 	var n: int = terrain.cells
-	accumulation = PackedFloat32Array()
-	accumulation.resize(count)
 	var moisture: PackedFloat32Array = terrain.moisture
-	for i in count:
-		accumulation[i] = 0.55 + moisture[i] * 0.9
-
+	var inflow_boosts: PackedFloat32Array = PackedFloat32Array()
 	# A brook that enters through a contract port arrives with the catchment it
 	# gathered next door. Starting it at zero would make the same stream a
 	# trickle on one side of the boundary and a channel on the other.
 	for port in inflow_ports:
 		var cell: Vector2i = terrain.local_cell_of(port.position.x, port.position.y)
 		if terrain.contains_local(cell.x, cell.y):
-			accumulation[cell.y * n + cell.x] += config.river_accum_threshold * 0.5
+			inflow_boosts.append(float(cell.y * n + cell.x))
+			inflow_boosts.append(config.river_accum_threshold * 0.5)
+
+	if ClassDB.class_exists("OrrunGen"):
+		var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
+		accumulation = native.call(
+			"accumulate", flow_order, receiver, moisture, inflow_boosts
+		)
+		return
+
+	accumulation = PackedFloat32Array()
+	accumulation.resize(count)
+	for i in count:
+		accumulation[i] = 0.55 + moisture[i] * 0.9
+	var b: int = 0
+	while b < inflow_boosts.size():
+		accumulation[int(inflow_boosts[b])] += inflow_boosts[b + 1]
+		b += 2
 
 	# flow_order runs downstream-first, so walking it backwards guarantees every
 	# contributor is finished before its receiver is touched.
@@ -321,6 +364,43 @@ func _find_lakes() -> void:
 	var n: int = terrain.cells
 	var count: int = n * n
 	var elevation: PackedFloat32Array = terrain.elevation
+
+	var sink_mask: PackedByteArray = PackedByteArray()
+	sink_mask.resize(count)
+	for i in count:
+		sink_mask[i] = 1 if _is_sink(i) else 0
+
+	if ClassDB.class_exists("OrrunGen"):
+		var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
+		var params: Dictionary = {
+			"cells": n,
+			"cell_size": terrain.cell_size,
+			"origin_x": terrain.origin_cell.x,
+			"origin_z": terrain.origin_cell.y,
+			"local_min_x": local_min.x,
+			"local_min_z": local_min.y,
+			"local_max_x": local_max.x,
+			"local_max_z": local_max.y,
+			"lake_epsilon": LAKE_EPSILON,
+			"local_lake_max_span": LOCAL_LAKE_MAX_SPAN,
+			"lake_min_cells": config.lake_min_cells,
+			"lake_max_cells": config.lake_max_cells,
+			"lake_min_depth": config.lake_min_depth,
+		}
+		var result: Variant = native.call(
+			"find_lakes",
+			elevation,
+			filled,
+			sink_mask,
+			receiver,
+			accumulation,
+			params
+		)
+		if typeof(result) == TYPE_DICTIONARY:
+			_apply_native_lakes(result)
+			return
+		push_error("OrrunGen.find_lakes failed: %s" % [result])
+
 	lake_id = PackedInt32Array()
 	lake_id.resize(count)
 	for i in count:
@@ -363,7 +443,7 @@ func _find_lakes() -> void:
 			# Both sides apply this test to the same basin, so both reject it.
 			if not _in_local_domain(cell):
 				rejected = true
-			if _is_sink(cell):
+			if sink_mask[cell] != 0:
 				rejected = true
 			var centre: Vector2 = terrain.cell_center(cx, cz)
 			min_x = minf(min_x, centre.x)
@@ -407,6 +487,34 @@ func _find_lakes() -> void:
 			(max_z - min_z) + config.macro_cell_size
 		)
 		lake.outlet_cell = _find_outlet(lake)
+		lakes.append(lake)
+
+
+func _apply_native_lakes(result: Dictionary) -> void:
+	lake_id = result["lake_id"]
+	lakes.clear()
+	var surfaces: PackedFloat32Array = result["surface"]
+	var depths: PackedFloat32Array = result["max_depth"]
+	var outlets: PackedInt32Array = result["outlet"]
+	var bounds: PackedFloat32Array = result["bounds"]
+	var offsets: PackedInt32Array = result["member_offsets"]
+	var members: PackedInt32Array = result["members"]
+	for i in surfaces.size():
+		var lake: LakeData = LakeData.new()
+		lake.id = i
+		lake.surface_z = surfaces[i]
+		lake.max_depth = depths[i]
+		lake.outlet_cell = outlets[i]
+		lake.bounds = Rect2(
+			bounds[i * 4], bounds[i * 4 + 1], bounds[i * 4 + 2], bounds[i * 4 + 3]
+		)
+		var from_i: int = offsets[i]
+		var to_i: int = offsets[i + 1]
+		var cells: PackedInt32Array = PackedInt32Array()
+		cells.resize(to_i - from_i)
+		for j in cells.size():
+			cells[j] = members[from_i + j]
+		lake.cells = cells
 		lakes.append(lake)
 
 
