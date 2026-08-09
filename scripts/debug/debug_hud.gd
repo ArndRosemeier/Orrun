@@ -79,8 +79,15 @@ func _process(_delta: float) -> void:
 			info["claim"] if String(info["claim"]) != "" else "none"
 		])
 
-	lines.append("last chunk %d ms   worst water-bed deficit %.3f m" % [
-		streamer.stat_last_build_ms, streamer.stat_worst_contract_error
-	])
+	lines.append(
+		"last chunk %d ms (dens %d  mesh %d  water %d  dress %d)   deficit %.3f m" % [
+			streamer.stat_last_build_ms,
+			streamer.stat_last_density_ms,
+			streamer.stat_last_mesh_ms,
+			streamer.stat_last_water_ms,
+			streamer.stat_last_dress_ms,
+			streamer.stat_worst_contract_error,
+		]
+	)
 	lines.append("F1 hud   F4 terrain tune   M map   F3 corridor mask   V fly   Esc mouse")
 	_label.text = "\n".join(lines)

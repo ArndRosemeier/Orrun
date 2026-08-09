@@ -32,6 +32,7 @@ pub struct FillParams {
 	pub warp_strength: f32,
 	pub ocean_floor_margin: f32,
 	pub inland_freeboard: f32,
+	pub sea_surface_z: f32,
 	pub relief_amp_plains: f32,
 	pub relief_amp_hills: f32,
 	pub relief_amp_mountains: f32,
@@ -129,6 +130,7 @@ pub fn fill_window(
 				p.mountain_detail,
 				p.swell_height,
 				p.mountain_macro_contrast,
+				p.sea_surface_z,
 			);
 			height = shore_authority(
 				height,
@@ -140,6 +142,7 @@ pub fn fill_window(
 				&coast,
 				p.ocean_floor_margin,
 				p.inland_freeboard,
+				p.sea_surface_z,
 			);
 
 			elevation[index] = height;
@@ -280,12 +283,14 @@ fn carve_valleys(
 	mountain_detail: f32,
 	swell_height: f32,
 	mountain_macro_contrast: f32,
+	sea_surface_z: f32,
 ) -> f32 {
 	let mut out = height;
 	let relief = fields::sample_smooth(relief01, atlas_size, world_x, world_z);
+	let contrast_gutter = ((mountain_macro_contrast - 1.0).max(0.0) * 18.0 * relief).min(22.0);
 	let detail_amp = mountain_detail * lerp(0.35, 1.0, relief) * 0.65
 		+ swell_height * lerp(1.0, 0.4, relief) * 0.35
-		+ (mountain_macro_contrast - 1.0).max(0.0) * 40.0 * relief;
+		+ contrast_gutter;
 	let min_gutter = trunk_bank_rise + detail_amp;
 	for &base_i in bases {
 		let base = base_i as usize;
@@ -310,7 +315,11 @@ fn carve_valleys(
 			continue;
 		}
 		let atlas_floor = ay + (by - ay) * t + trunk_bank_rise;
-		let floor_z = atlas_floor.min(height - min_gutter).min(height);
+		// Match GDScript: never dig dry land below global sea.
+		let floor_z = atlas_floor
+			.min(height - min_gutter)
+			.min(height)
+			.max(sea_surface_z);
 		let ramp = smoothstep(0.0, radius, d);
 		out = out.min(lerp(floor_z, height, ramp));
 	}
@@ -328,6 +337,7 @@ fn shore_authority(
 	coast: &Noise2D,
 	ocean_floor_margin: f32,
 	inland_freeboard: f32,
+	sea_surface_z: f32,
 ) -> f32 {
 	let wet = fields::sample_smooth(water_flag, atlas_size, world_x, world_z);
 	let wobble = coast.get(world_x, world_z) * COAST_WOBBLE;
@@ -339,6 +349,8 @@ fn shore_authority(
 		let depth = (ocean_floor_margin + SHELF_DEPTH * wetness) * wetness;
 		return height.min(plane - depth);
 	}
+	// Absolute floor: dry ground stays at or above the global sea.
+	let height = height.max(sea_surface_z);
 	let band = 1.0 - smoothstep(0.0, SHORE_OUTER, signed_shore);
 	if band <= 0.0 {
 		return height;

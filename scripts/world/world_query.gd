@@ -26,21 +26,59 @@ static func macro_surface_at(sector: WorldSector, world_x: float, world_z: float
 static func water_surface_at(
 	sector: WorldSector, continental: ContinentalTerrain, world_x: float, world_z: float
 ) -> float:
-	if continental.shore_signed(world_x, world_z) <= 0.0:
-		return continental.water_plane_at(world_x, world_z)
+	var shore_d: float = continental.shore_distance(world_x, world_z)
+	var atlas_plane: float = continental.water_plane_at(world_x, world_z)
+	if shore_d <= 0.0:
+		return atlas_plane
 	var lake: int = sector.hydro.lake_at(world_x, world_z)
 	if lake >= 0:
 		return sector.hydro.lakes[lake].surface_z
 	var reach: Dictionary = sector.hydro.nearest_reach(world_x, world_z, 64.0)
 	if reach.is_empty():
 		return -INF
-	if float(reach["distance"]) <= float(reach["half_width"]):
-		# Match DensityField: under the continental bed, with freeboard, and not
-		# pulled into a deep slot by a buried polyline chord.
+	# Match DensityField's LOD-safe wet half (LOD0 voxel is 2 m → 0.75·2).
+	var wet_half: float = maxf(float(reach["half_width"]), 1.5)
+	if float(reach["distance"]) <= wet_half:
+		# Match DensityField draping (including breaking false macro chords).
 		var height: float = continental.height_at(world_x, world_z)
-		var draped: float = minf(float(reach["water_z"]), height)
-		draped = maxf(draped, height - DensityField.MAX_CHORD_BURY)
-		return draped - DensityField.WATER_FREEBOARD
+		var river_z: float = float(reach["water_z"])
+		var draped: float = minf(river_z, height)
+		if height > river_z + DensityField.MAX_CHORD_BURY * DensityField.CHORD_BREAK_FACTOR:
+			draped = river_z
+		else:
+			draped = maxf(draped, height - DensityField.MAX_CHORD_BURY)
+		var sheet: float = draped - DensityField.WATER_FREEBOARD
+		# Pull-down only (match DensityField). Never raise a low sheet to the sea.
+		if shore_d < DensityField.ESTUARY_BLEND_METRES and sheet > atlas_plane:
+			var t: float = 1.0 - clampf(
+				shore_d / DensityField.ESTUARY_BLEND_METRES, 0.0, 1.0
+			)
+			sheet = lerpf(sheet, atlas_plane, t)
+		return sheet
+	# Lake mouth / approach: match DensityField — only beside the mask when the
+	# channel is already at the spill (not mid-cascade between two lakes).
+	var lake_d: float = sector.hydro.lake_distance_at(world_x, world_z)
+	if lake_d <= sector.config.macro_cell_size * 1.25:
+		var spill: float = sector.hydro.lake_surface_near_at(world_x, world_z)
+		var river_z: float = float(reach["water_z"])
+		if (
+			spill > -INF
+			and float(reach["distance"]) <= wet_half
+			and absf(river_z - spill) <= 2.0
+		):
+			return spill - DensityField.WATER_FREEBOARD
+		var height: float = continental.height_at(world_x, world_z)
+		var drain: float = sector.hydro.drainage_at(world_x, world_z)
+		if (
+			spill > -INF
+			and float(reach["distance"]) <= wet_half * 1.35
+			and drain > height + DensityField.MIN_VISIBLE_WATER_CLEARANCE
+			and absf(drain - spill) <= 2.0
+		):
+			return minf(
+				minf(drain, spill) - DensityField.WATER_FREEBOARD,
+				height - DensityField.MIN_VISIBLE_WATER_CLEARANCE
+			)
 	return -INF
 
 

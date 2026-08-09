@@ -5,8 +5,10 @@ mod fields;
 mod fill_window;
 mod flood;
 mod lakes;
+mod mesh_extract;
 mod noise;
 mod road_astar;
+mod volume;
 
 struct OrrunGenExtension;
 
@@ -142,6 +144,7 @@ impl OrrunGen {
 				warp_strength: get_f("warp_strength"),
 				ocean_floor_margin: get_f("ocean_floor_margin"),
 				inland_freeboard: get_f("inland_freeboard"),
+				sea_surface_z: get_f("sea_surface_z"),
 				relief_amp_plains: get_f("relief_amp_plains"),
 				relief_amp_hills: get_f("relief_amp_hills"),
 				relief_amp_mountains: get_f("relief_amp_mountains"),
@@ -210,8 +213,84 @@ impl OrrunGen {
 		)
 	}
 
+	/// Surface-nets extract over a density volume. Column arrays are XZ-major.
+	#[func]
+	fn mesh_extract(
+		&self,
+		values: PackedFloat32Array,
+		ground_color: PackedColorArray,
+		wetness: PackedFloat32Array,
+		corridor_mask: PackedFloat32Array,
+		temperature: PackedFloat32Array,
+		roadness: PackedFloat32Array,
+		dims_x: i32,
+		dims_y: i32,
+		dims_z: i32,
+		voxel: f32,
+		local_origin: Vector3,
+		want_collision: bool,
+		want_skirts: bool,
+	) -> Dictionary<Variant, Variant> {
+		mesh_extract::build(
+			values,
+			ground_color,
+			wetness,
+			corridor_mask,
+			temperature,
+			roadness,
+			dims_x,
+			dims_y,
+			dims_z,
+			voxel,
+			local_origin,
+			want_collision,
+			want_skirts,
+		)
+	}
+
+	/// 3D density volume from column surfaces. Returns values + origin_y + samples_y.
+	#[func]
+	fn build_volume(
+		&self,
+		surface_z: PackedFloat32Array,
+		corridor_mask: PackedFloat32Array,
+		water_top: PackedFloat32Array,
+		overhang_amp: PackedFloat32Array,
+		params: Dictionary<Variant, Variant>,
+	) -> Dictionary<Variant, Variant> {
+		let get_i = |key: &str| -> i32 { params.get_or_nil(key).to::<i64>() as i32 };
+		let get_f = |key: &str| -> f32 { params.get_or_nil(key).to::<f32>() };
+		let get_b = |key: &str| -> bool { params.get_or_nil(key).to::<bool>() };
+		volume::build_volume(
+			surface_z,
+			corridor_mask,
+			water_top,
+			overhang_amp,
+			volume::VolumeParams {
+				samples_h: get_i("samples_h"),
+				voxel: get_f("voxel"),
+				origin_x: get_f("origin_x"),
+				origin_z: get_f("origin_z"),
+				surface_band: get_f("surface_band"),
+				vertical_margin: get_f("vertical_margin"),
+				world_floor: get_f("world_floor"),
+				world_ceiling: get_f("world_ceiling"),
+				cave_enabled: get_b("cave_enabled"),
+				cave_top_depth: get_f("cave_top_depth"),
+				cave_bottom_depth: get_f("cave_bottom_depth"),
+				cave_threshold: get_f("cave_threshold"),
+				cave_water_clearance: get_f("cave_water_clearance"),
+				seed_overhang: get_i("seed_overhang"),
+				overhang_scale: get_f("overhang_scale"),
+				seed_cave_a: get_i("seed_cave_a"),
+				seed_cave_b: get_i("seed_cave_b"),
+				cave_scale: get_f("cave_scale"),
+			},
+		)
+	}
+
 	#[func]
 	fn version(&self) -> GString {
-		GString::from("orrun_gen 0.2.1 (fill+atlas_landmask+roads)")
+		GString::from("orrun_gen 0.3.0 (mesh+volume+fill+atlas+roads)")
 	}
 }

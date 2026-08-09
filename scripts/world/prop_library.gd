@@ -31,23 +31,47 @@ static func load_catalog(specs: Array[PropPlacer.PropSpec], catalog_path: String
 	for spec in specs:
 		var path: String = LIBRARY_DIR + String(sources[spec.id])
 		if not ResourceLoader.exists(path):
-			_report_missing(spec.id, path)
+			_report_missing(spec.id, path, FileAccess.file_exists(path))
 			continue
 		var scene: PackedScene = load(path)
 		var mesh: Mesh = _first_mesh(scene)
 		if mesh == null:
-			_report_missing(spec.id, path)
+			_report_missing(spec.id, path, true)
 			continue
 		_meshes[spec.id] = mesh
 
 
-static func _report_missing(id: StringName, path: String) -> void:
+static func load_sources(sources: Dictionary) -> void:
+	## Extra id -> filename entries (e.g. ground clutter) into the same library.
+	assert(_loaded, "PropLibrary.load_catalog must run before load_sources")
+	for id_variant in sources:
+		var id: StringName = id_variant
+		var path: String = LIBRARY_DIR + String(sources[id])
+		if not ResourceLoader.exists(path):
+			_report_missing(id, path, FileAccess.file_exists(path))
+			continue
+		var scene: PackedScene = load(path)
+		var mesh: Mesh = _first_mesh(scene)
+		if mesh == null:
+			_report_missing(id, path, true)
+			continue
+		_meshes[id] = mesh
+
+
+static func _report_missing(id: StringName, path: String, on_disk: bool = false) -> void:
 	_missing[id] = path
-	push_error(
-		"Prop '%s' is in the catalog but has no mesh at %s. "
-		% [id, path]
-		+ "Run: python tools/sync_assets.py (and generate it in the Asset Lab first)."
-	)
+	if on_disk:
+		push_error(
+			"Prop '%s' is on disk at %s but Godot has not imported it yet. "
+			% [id, path]
+			+ "Run the editor once, or: godot --path . --headless --editor --import"
+		)
+	else:
+		push_error(
+			"Prop '%s' is in the catalog but has no mesh at %s. "
+			% [id, path]
+			+ "Run: python tools/sync_assets.py (and generate it in the Asset Lab first)."
+		)
 
 
 static func _first_mesh(scene: PackedScene) -> Mesh:

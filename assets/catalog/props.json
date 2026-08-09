@@ -11,7 +11,43 @@
       "avoid_water": 3.0,
       "clearance_road": 4.0,
       "biomes": { "plains": 0.1, "forest_hills": 1.0, "rocky_badlands": 0.05, "alpine": 0.35 },
-      "density": 0.55
+      "density": 0.45
+    },
+    {
+      "id": "pine_alpine_short",
+      "source": "pine_alpine_short.glb",
+      "footprint": 1.4,
+      "max_slope_deg": 34.0,
+      "min_scale": 0.75,
+      "max_scale": 1.35,
+      "avoid_water": 2.5,
+      "clearance_road": 3.5,
+      "biomes": { "plains": 0.05, "forest_hills": 0.45, "rocky_badlands": 0.1, "alpine": 1.0 },
+      "density": 0.5
+    },
+    {
+      "id": "pine_spruce_narrow",
+      "source": "pine_spruce_narrow.glb",
+      "footprint": 1.25,
+      "max_slope_deg": 28.0,
+      "min_scale": 0.9,
+      "max_scale": 1.45,
+      "avoid_water": 3.0,
+      "clearance_road": 4.0,
+      "biomes": { "plains": 0.08, "forest_hills": 0.85, "rocky_badlands": 0.05, "alpine": 0.55 },
+      "density": 0.4
+    },
+    {
+      "id": "pine_young_sapling",
+      "source": "pine_young_sapling.glb",
+      "footprint": 0.85,
+      "max_slope_deg": 32.0,
+      "min_scale": 0.7,
+      "max_scale": 1.25,
+      "avoid_water": 2.0,
+      "clearance_road": 2.5,
+      "biomes": { "plains": 0.25, "forest_hills": 0.7, "rocky_badlands": 0.08, "alpine": 0.4 },
+      "density": 0.35
     },
     {
       "id": "rock_boulder_round",
@@ -22,8 +58,8 @@
       "max_scale": 2.2,
       "avoid_water": 0.5,
       "clearance_road": 3.0,
-      "biomes": { "plains": 0.12, "forest_hills": 0.3, "rocky_badlands": 1.0, "alpine": 0.8 },
-      "density": 0.3
+      "biomes": { "plains": 0.08, "forest_hills": 0.22, "rocky_badlands": 0.85, "alpine": 0.55 },
+      "density": 0.2
     },
     {
       "id": "rock_slab_veined",
@@ -34,14 +70,133 @@
       "max_scale": 1.8,
       "avoid_water": 0.5,
       "clearance_road": 3.0,
-      "biomes": { "plains": 0.05, "forest_hills": 0.15, "rocky_badlands": 0.85, "alpine": 0.55 },
-      "density": 0.2
+      "biomes": { "plains": 0.05, "forest_hills": 0.15, "rocky_badlands": 0.85, "alpine": 0.5 },
+      "density": 0.18
+    },
+    {
+      "id": "rock_chunk_angular",
+      "source": "rock_chunk_angular.glb",
+      "footprint": 1.0,
+      "max_slope_deg": 45.0,
+      "min_scale": 0.55,
+      "max_scale": 2.0,
+      "avoid_water": 0.4,
+      "clearance_road": 2.5,
+      "biomes": { "plains": 0.05, "forest_hills": 0.18, "rocky_badlands": 0.9, "alpine": 0.75 },
+      "density": 0.22
+    },
+    {
+      "id": "rock_dark_basalt",
+      "source": "rock_dark_basalt.glb",
+      "footprint": 1.15,
+      "max_slope_deg": 40.0,
+      "min_scale": 0.65,
+      "max_scale": 2.1,
+      "avoid_water": 0.5,
+      "clearance_road": 3.0,
+      "biomes": { "plains": 0.06, "forest_hills": 0.2, "rocky_badlands": 0.75, "alpine": 0.65 },
+      "density": 0.22
+    },
+    {
+      "id": "rock_talus_shard",
+      "source": "rock_talus_shard.glb",
+      "footprint": 0.7,
+      "max_slope_deg": 48.0,
+      "min_scale": 0.5,
+      "max_scale": 1.9,
+      "avoid_water": 0.3,
+      "clearance_road": 2.0,
+      "biomes": { "plains": 0.04, "forest_hills": 0.12, "rocky_badlands": 0.7, "alpine": 0.85 },
+      "density": 0.4
+    },
+    {
+      "id": "rock_fieldstone_low",
+      "source": "rock_fieldstone_low.glb",
+      "footprint": 1.15,
+      "max_slope_deg": 36.0,
+      "min_scale": 0.7,
+      "max_scale": 1.8,
+      "avoid_water": 0.6,
+      "clearance_road": 2.5,
+      "biomes": { "plains": 0.55, "forest_hills": 0.65, "rocky_badlands": 0.45, "alpine": 0.4 },
+      "density": 0.42
+    },
+    {
+      "id": "rock_cobble_worn",
+      "source": "rock_cobble_worn.glb",
+      "footprint": 0.75,
+      "max_slope_deg": 34.0,
+      "min_scale": 0.65,
+      "max_scale": 1.7,
+      "avoid_water": 0.5,
+      "clearance_road": 2.0,
+      "biomes": { "plains": 0.7, "forest_hills": 0.55, "rocky_badlands": 0.35, "alpine": 0.25 },
+      "density": 0.5
+    },
+    {
+      "id": "rock_riverstone_flat",
+      "source": "rock_riverstone_flat.glb",
+      "footprint": 1.0,
+      "max_slope_deg": 32.0,
+      "min_scale": 0.7,
+      "max_scale": 1.9,
+      "avoid_water": 0.35,
+      "clearance_road": 2.5,
+      "biomes": { "plains": 0.45, "forest_hills": 0.5, "rocky_badlands": 0.2, "alpine": 0.3 },
+      "density": 0.38
+    },
+    {
+      "id": "house_hut_thatch",
+      "source": "house_hut_thatch.glb",
+      "footprint": 5.5,
+      "max_slope_deg": 22.0,
+      "min_scale": 1.0,
+      "max_scale": 1.0,
+      "avoid_water": 4.0,
+      "clearance_road": 2.0,
+      "biomes": { "plains": 0.0, "forest_hills": 0.0, "rocky_badlands": 0.0, "alpine": 0.0 },
+      "density": 0.0
+    },
+    {
+      "id": "house_cabin_timber",
+      "source": "house_cabin_timber.glb",
+      "footprint": 8.0,
+      "max_slope_deg": 22.0,
+      "min_scale": 1.0,
+      "max_scale": 1.0,
+      "avoid_water": 4.0,
+      "clearance_road": 2.0,
+      "biomes": { "plains": 0.0, "forest_hills": 0.0, "rocky_badlands": 0.0, "alpine": 0.0 },
+      "density": 0.0
+    },
+    {
+      "id": "house_cottage_stone",
+      "source": "house_cottage_stone.glb",
+      "footprint": 9.5,
+      "max_slope_deg": 22.0,
+      "min_scale": 1.0,
+      "max_scale": 1.0,
+      "avoid_water": 4.0,
+      "clearance_road": 2.0,
+      "biomes": { "plains": 0.0, "forest_hills": 0.0, "rocky_badlands": 0.0, "alpine": 0.0 },
+      "density": 0.0
+    },
+    {
+      "id": "house_hall_large",
+      "source": "house_hall_large.glb",
+      "footprint": 16.0,
+      "max_slope_deg": 20.0,
+      "min_scale": 1.0,
+      "max_scale": 1.0,
+      "avoid_water": 5.0,
+      "clearance_road": 2.0,
+      "biomes": { "plains": 0.0, "forest_hills": 0.0, "rocky_badlands": 0.0, "alpine": 0.0 },
+      "density": 0.0
     }
   ],
   "wanted_from_asset_lab": [
     "cliff_face and talus variants for badlands and alpine",
     "arch / overhang kits to dress natural overhangs",
-    "broadleaf and shrub species so plains and forest read differently",
-    "modular bridge spans (timber short, stone medium) with abutment pieces"
+    "broadleaf and shrub species so plains and forest read differently"
   ]
 }

@@ -36,6 +36,15 @@ func sort_waiting() -> void:
 	_waiting.sort_custom(func(a: Job, b: Job) -> bool: return a.priority < b.priority)
 
 
+## Refresh priorities from the caller's current focus (player chunk), then sort.
+## Without this, "nearest" freezes at enqueue time and a moving player starves
+## the ground ahead with obsolete near-work that is now behind them.
+func retarget_waiting(update_priority: Callable) -> void:
+	for job in _waiting:
+		update_priority.call(job)
+	sort_waiting()
+
+
 func pump() -> void:
 	while _running.size() < max_in_flight and not _waiting.is_empty():
 		var job: Job = _waiting.pop_front()

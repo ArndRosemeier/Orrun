@@ -20,13 +20,13 @@ extends RefCounted
 static var NEIGHBOR_DX: PackedInt32Array = PackedInt32Array([1, 1, 0, -1, -1, -1, 0, 1])
 static var NEIGHBOR_DZ: PackedInt32Array = PackedInt32Array([0, 1, 1, 1, 0, -1, -1, -1])
 const HEURISTIC_WEIGHT: float = 1.35
-const BRIDGE_CLEARANCE: float = 2.6
+## Deck sits this far above the water; bank approaches grade up to meet it.
+const BRIDGE_CLEARANCE: float = 1.8
 ## How far past the channel edge a deck lands, so it rests on bank rather than
 ## on the water it is spanning.
 const BANK_MARGIN: float = 3.5
 ## Even the smallest structure has to be walkable and read as a bridge.
 const MIN_SPAN: float = 9.0
-const APPROACH_LENGTH: float = 48.0
 ## Radius of the pointwise filter that drapes a trunk road on the terrain.
 ## Pointwise, not along-chain: a rolling average over the stations this sector
 ## happens to hold would give a different height wherever the chain is clipped.
@@ -402,6 +402,59 @@ func _connect_local() -> void:
 			_route_positions(nodes[a], join, RoadEdge.Tier.TRAIL, a, -1)
 
 
+func _half_width_of_tier(tier: RoadEdge.Tier) -> float:
+	match tier:
+		RoadEdge.Tier.PRIMARY:
+			return config.road_width_primary * 0.5
+		RoadEdge.Tier.SECONDARY:
+			return config.road_width_secondary * 0.5
+		_:
+			return config.road_width_trail * 0.5
+
+
+## Signed distance to the nearest trunk carriageway edge (negative = inside).
+func _trunk_bed_clearance(pos: Vector2) -> float:
+	var best: float = INF
+	for road in roads:
+		if not road.is_trunk:
+			continue
+		var proj: Dictionary = _project_on_road(road, pos)
+		var d: float = pos.distance_to(proj["position"] as Vector2) - road.half_width
+		if d < best:
+			best = d
+	return best
+
+
+## Drop ends that sit in a trunk bed so a join does not pave a second lane.
+func _trim_path_off_trunk_bed(path: PackedInt32Array, local_half: float) -> PackedInt32Array:
+	if path.size() < 2:
+		return path
+	var n: int = terrain.cells
+	var start: int = 0
+	var cut: int = path.size()
+	while cut > start + 1:
+		var cell: int = path[cut - 1]
+		var pos: Vector2 = terrain.cell_center(cell % n, int(cell / n))
+		if _trunk_bed_clearance(pos) >= local_half + 1.0:
+			break
+		cut -= 1
+	while start < cut - 1:
+		var cell_s: int = path[start]
+		var pos_s: Vector2 = terrain.cell_center(cell_s % n, int(cell_s / n))
+		if _trunk_bed_clearance(pos_s) >= local_half + 1.0:
+			break
+		start += 1
+	if cut - start < 2:
+		return PackedInt32Array()
+	if start == 0 and cut == path.size():
+		return path
+	var out: PackedInt32Array = PackedInt32Array()
+	out.resize(cut - start)
+	for i in cut - start:
+		out[i] = path[start + i]
+	return out
+
+
 ## Nearest point on a trunk road that lies inside the core, or INF.
 func _nearest_trunk_point(from: Vector2) -> Vector2:
 	var best: Vector2 = Vector2.INF
@@ -431,11 +484,21 @@ func _route_positions(
 		return
 	if not terrain.contains_local(goal_cell.x, goal_cell.y):
 		return
+	var half: float = config.road_width_trail * 0.5
+	match tier:
+		RoadEdge.Tier.PRIMARY:
+			half = config.road_width_primary * 0.5
+		RoadEdge.Tier.SECONDARY:
+			half = config.road_width_secondary * 0.5
+
 	var path: PackedInt32Array = _astar(
 		start_cell.y * terrain.cells + start_cell.x,
 		goal_cell.y * terrain.cells + goal_cell.x,
 		tier
 	)
+	# Join stubs used to keep walking the trunk corridor and lay a second
+	# carriageway beside it. Stop once the path enters the trunk bed.
+	path = _trim_path_off_trunk_bed(path, half)
 	if path.size() < 2:
 		return
 
@@ -444,13 +507,7 @@ func _route_positions(
 	road.tier = tier
 	road.from_node = from_node
 	road.to_node = to_node
-	match tier:
-		RoadEdge.Tier.PRIMARY:
-			road.half_width = config.road_width_primary * 0.5
-		RoadEdge.Tier.SECONDARY:
-			road.half_width = config.road_width_secondary * 0.5
-		_:
-			road.half_width = config.road_width_trail * 0.5
+	road.half_width = half
 
 	road.points = _path_to_polyline(path)
 	_find_local_crossings(road, path)
@@ -516,6 +573,15 @@ func _astar(start: int, goal: int, tier: RoadEdge.Tier) -> PackedInt32Array:
 			var centre: Vector2 = terrain.cell_center(nx, nz)
 			if claims.kind_at(centre.x, centre.y) == &"dungeon_mouth":
 				step += 900.0
+			# Local tracks must not cruise along a trunk: that benches two roads
+			# side by side. Allow the last cell or two so a join can still meet.
+			var dist_goal: float = (
+				Vector2(float(nx - gx), float(nz - gz)).length() * cs
+			)
+			if dist_goal > cs * 2.5:
+				var trunk_clear: float = _trunk_bed_clearance(centre)
+				if trunk_clear < _half_width_of_tier(tier) + 2.0:
+					step += 40.0
 			step *= trail_penalty
 
 			var tentative: float = g_score[current] + step
@@ -609,7 +675,14 @@ func _find_local_crossings(road: RoadEdge, path: PackedInt32Array) -> void:
 	var run_start: int = -1
 	for i in path.size():
 		var cell: int = path[i]
-		var wet: bool = hydro.is_channel[cell] != 0 or hydro.lake_id[cell] != -1
+		# Trunk cells are sinks, so they never get is_channel. A local track that
+		# pays the trunk penalty and walks the corridor used to pave through the
+		# water with no span — a road (or a second "bridge") under the sheet.
+		var wet: bool = (
+			hydro.is_channel[cell] != 0
+			or hydro.lake_id[cell] != -1
+			or hydro.trunk[cell] != 0
+		)
 		if wet and run_start < 0:
 			run_start = i
 		elif not wet and run_start >= 0:
@@ -677,6 +750,15 @@ func _add_crossing(
 	order: int,
 	over_lake: bool
 ) -> void:
+	# Several roads often hit the same trunk crossing. One kit mesh; every road
+	# still records the site so grades/profiles meet the same deck.
+	for existing in bridges:
+		var ex: Vector3 = existing.center()
+		if Vector2(ex.x - centre.x, ex.z - centre.y).length() < 24.0:
+			if road.crossings.find(existing) < 0:
+				road.crossings.append(existing)
+			return
+
 	var site: BridgeSite = BridgeSite.new()
 	site.id = bridges.size()
 	site.road_id = road.id
@@ -688,24 +770,36 @@ func _add_crossing(
 		and channel_half * 2.0 <= config.ford_max_width
 	)
 
-	var pos_a: Vector2 = centre - axis * span_half
-	var pos_b: Vector2 = centre + axis * span_half
-	var bank_z: float = maxf(
-		terrain.height_at(pos_a.x, pos_a.y), terrain.height_at(pos_b.x, pos_b.y)
-	)
+	var use_axis: Vector2 = axis.normalized() if axis.length_squared() > 0.0001 else Vector2.RIGHT
+	var pos_a: Vector2 = centre - use_axis * span_half
+	var pos_b: Vector2 = centre + use_axis * span_half
+	# Deck is one height for both banks; density hard-sets abutments to it after
+	# village terracing. Prefer the higher bank so we fill the low side up.
+	var bank_a: float = terrain.height_at(pos_a.x, pos_a.y)
+	var bank_b: float = terrain.height_at(pos_b.x, pos_b.y)
 	var deck_z: float = (
-		water_z - 0.2 if site.is_ford else maxf(bank_z, water_z + BRIDGE_CLEARANCE)
+		water_z - 0.2 if site.is_ford
+		else maxf(maxf(bank_a, bank_b), water_z + BRIDGE_CLEARANCE)
 	)
+	site.deck_z = deck_z
+	site.axis = use_axis
+	site.center_xz = centre
+	site.abutment_s = span_half
+	var raw_gap: float = channel_half if channel_half > 0.01 else span_half * 0.65
+	site.gap_half = minf(raw_gap, maxf(span_half - 1.5, span_half * 0.5))
+	site.ramp_length = BridgeSite.RAMP_LENGTH
+	site.plateau_length = BridgeSite.PLATEAU_LENGTH
+	site.grade_half_width = site.deck_width * 0.5 + BridgeSite.GRADE_HALF_EXTRA
 	site.anchor_a = Vector3(pos_a.x, deck_z, pos_a.y)
 	site.anchor_b = Vector3(pos_b.x, deck_z, pos_b.y)
 	site.catalog_id = &"ford" if site.is_ford else (
-		&"procedural_stone" if site.river_order >= 3 else &"procedural_timber"
+		&"stone" if site.river_order >= 3 else &"timber"
 	)
 
 	if not site.is_ford:
 		claims.add(
 			&"bridge", Vector2(site.center().x, site.center().z),
-			site.span_length() * 0.6, deck_z
+			site.span_length() * 0.35, deck_z
 		)
 
 	road.crossings.append(site)
@@ -765,19 +859,33 @@ func _smooth_profile(road: RoadEdge) -> void:
 	road.points = points
 
 
-## Crossings win: force the deck height, then ramp the approaches back to the
-## profile so nothing steps vertically at the bank.
+## Crossings win: hold [member BridgeSite.deck_z] through the abutment apron,
+## then ease inland so the road bench matches density grades.
 func _apply_crossing_profile(road: RoadEdge) -> void:
 	var points: PackedVector3Array = road.points
 	for site in road.crossings:
-		var centre: Vector3 = site.center()
-		var deck: float = site.deck_height()
+		if site.is_ford:
+			continue
+		var centre: Vector2 = site.center_xz
+		var axis: Vector2 = site.direction()
+		var deck: float = site.deck_z
+		var hard_end: float = site.abutment_s + site.plateau_length
+		var ramp: float = site.ramp_length
+		var lateral_max: float = site.grade_half_width
 		for i in points.size():
-			var d: float = Vector2(points[i].x - centre.x, points[i].z - centre.z).length()
-			if d > APPROACH_LENGTH:
+			var p: Vector2 = Vector2(points[i].x, points[i].z)
+			var delta: Vector2 = p - centre
+			var along: float = absf(delta.dot(axis))
+			var lateral: float = absf(delta.x * axis.y - delta.y * axis.x)
+			if lateral > lateral_max or along > hard_end + ramp:
 				continue
-			var blend: float = 1.0 - smoothstep(site.span_length() * 0.5, APPROACH_LENGTH, d)
-			points[i] = Vector3(points[i].x, lerpf(points[i].y, deck, blend), points[i].z)
+			var target: float = deck
+			if along > hard_end:
+				var t: float = (along - hard_end) / maxf(ramp, 0.001)
+				t = clampf(t, 0.0, 1.0)
+				# Stay near deck_z for the first half so exits cut hills / fill gaps.
+				target = lerpf(deck, points[i].y, t * t)
+			points[i] = Vector3(points[i].x, target, points[i].z)
 	road.points = points
 
 

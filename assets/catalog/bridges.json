@@ -1,0 +1,23 @@
+{
+  "comment": "Modular bridge kits from the Asset Lab. Mid spans tile; end pieces are abutments. Meshes live in res://assets/library via tools/sync_assets.py.",
+  "kits": [
+    {
+      "id": "timber",
+      "mid_source": "bridge_timber_mid.glb",
+      "end_source": "bridge_timber_end.glb",
+      "segment_length": 8.0,
+      "end_length": 4.0,
+      "deck_top": 0.85,
+      "authored_width": 5.2
+    },
+    {
+      "id": "stone",
+      "mid_source": "bridge_stone_mid.glb",
+      "end_source": "bridge_stone_end.glb",
+      "segment_length": 10.0,
+      "end_length": 5.0,
+      "deck_top": 1.2,
+      "authored_width": 6.0
+    }
+  ]
+}

@@ -31,6 +31,7 @@ var terrain: MacroTerrain
 var hydro: Hydrology
 var claims: ClaimMask
 var paths: PathNetwork
+var houses: Array[HouseSite] = []
 
 ## Canonical contracts for the four boundaries, keyed by [SectorEdgeContract.Side].
 var edges: Dictionary = {}
@@ -86,13 +87,18 @@ static func generate(world_context: WorldContext, sector_coord: Vector2i) -> Wor
 		world_context.corridors, built.core_min, built.core_max
 	)
 	var t4: int = Time.get_ticks_msec()
+	built.houses = SettlementLayout.build(
+		world_context, built.terrain, built.hydro, built.claims, built.core_rect()
+	)
+	var t5: int = Time.get_ticks_msec()
 
 	built.bake_timings = {
 		"macro_ms": t1 - t0,
 		"contracts_ms": t2 - t1,
 		"hydrology_ms": t3 - t2,
 		"paths_ms": t4 - t3,
-		"total_ms": t4 - t0,
+		"settlements_ms": t5 - t4,
+		"total_ms": t5 - t0,
 	}
 	return built
 
@@ -166,6 +172,14 @@ func bridges_in_rect(rect: Rect2) -> Array[BridgeSite]:
 			continue
 		var centre: Vector3 = site.center()
 		if rect.has_point(Vector2(centre.x, centre.z)):
+			out.append(site)
+	return out
+
+
+func houses_in_rect(rect: Rect2) -> Array[HouseSite]:
+	var out: Array[HouseSite] = []
+	for site in houses:
+		if rect.has_point(Vector2(site.world_x, site.world_z)):
 			out.append(site)
 	return out
 

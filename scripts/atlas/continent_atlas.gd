@@ -524,134 +524,46 @@ func _build_landmask_elevation(
 	humidity: PackedByteArray,
 	relief: PackedByteArray
 ) -> void:
-	if ClassDB.class_exists("OrrunGen"):
-		var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
-		var params: Dictionary = {
-			"size": size,
-			"seed_continent": _layer_seed("atlas_continent"),
-			"seed_coast_cut": _layer_seed("atlas_coast_cut"),
-			"seed_peninsula": _layer_seed("atlas_peninsula"),
-			"seed_mountain": _layer_seed("atlas_mountain"),
-			"seed_moist": _layer_seed("atlas_moist"),
-			"seed_relief": _layer_seed("atlas_relief"),
-			"seed_warp": _layer_seed("atlas_warp"),
-			"seed_warp2": _layer_seed("atlas_warp2"),
-		}
-		var result: Variant = native.call("atlas_landmask", params)
-		if typeof(result) == TYPE_DICTIONARY:
-			var dict: Dictionary = result
-			var land_src: PackedByteArray = dict["land"]
-			var elev_src: PackedByteArray = dict["elev_code"]
-			var hum_src: PackedByteArray = dict["humidity"]
-			var rel_src: PackedByteArray = dict["relief"]
-			var count: int = size * size
-			if (
-				land_src.size() != count
-				or elev_src.size() != count
-				or hum_src.size() != count
-				or rel_src.size() != count
-			):
-				push_error(
-					"OrrunGen.atlas_landmask size mismatch: got %d want %d"
-					% [land_src.size(), count]
-				)
-			else:
-				for i in count:
-					land[i] = land_src[i]
-					elev_code[i] = elev_src[i]
-					humidity[i] = hum_src[i]
-					relief[i] = rel_src[i]
-				return
-		else:
-			push_error("OrrunGen.atlas_landmask failed: %s" % [result])
-
-	var continent: FastNoiseLite = _make_noise(
-		"atlas_continent", 0.0024, FastNoiseLite.FRACTAL_FBM, 6
+	assert(
+		ClassDB.class_exists("OrrunGen"),
+		"OrrunGen is required for ContinentAtlas.atlas_landmask"
 	)
-	var coast_cut: FastNoiseLite = _make_noise(
-		"atlas_coast_cut", 0.011, FastNoiseLite.FRACTAL_RIDGED, 4
+	var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
+	var params: Dictionary = {
+		"size": size,
+		"seed_continent": _layer_seed("atlas_continent"),
+		"seed_coast_cut": _layer_seed("atlas_coast_cut"),
+		"seed_peninsula": _layer_seed("atlas_peninsula"),
+		"seed_mountain": _layer_seed("atlas_mountain"),
+		"seed_moist": _layer_seed("atlas_moist"),
+		"seed_relief": _layer_seed("atlas_relief"),
+		"seed_warp": _layer_seed("atlas_warp"),
+		"seed_warp2": _layer_seed("atlas_warp2"),
+	}
+	var result: Variant = native.call("atlas_landmask", params)
+	assert(
+		typeof(result) == TYPE_DICTIONARY,
+		"OrrunGen.atlas_landmask failed: %s" % [result]
 	)
-	var peninsula: FastNoiseLite = _make_noise(
-		"atlas_peninsula", 0.0065, FastNoiseLite.FRACTAL_FBM, 4
+	var dict: Dictionary = result
+	var land_src: PackedByteArray = dict["land"]
+	var elev_src: PackedByteArray = dict["elev_code"]
+	var hum_src: PackedByteArray = dict["humidity"]
+	var rel_src: PackedByteArray = dict["relief"]
+	var count: int = size * size
+	assert(
+		land_src.size() == count
+		and elev_src.size() == count
+		and hum_src.size() == count
+		and rel_src.size() == count,
+		"OrrunGen.atlas_landmask size mismatch: got %d want %d"
+		% [land_src.size(), count]
 	)
-	var mountain: FastNoiseLite = _make_noise(
-		"atlas_mountain", 0.0045, FastNoiseLite.FRACTAL_RIDGED, 4
-	)
-	var moist: FastNoiseLite = _make_noise(
-		"atlas_moist", 0.0035, FastNoiseLite.FRACTAL_FBM, 3
-	)
-	var relief_n: FastNoiseLite = _make_noise(
-		"atlas_relief", 0.008, FastNoiseLite.FRACTAL_FBM, 3
-	)
-	var warp: FastNoiseLite = _make_noise(
-		"atlas_warp", 0.0035, FastNoiseLite.FRACTAL_FBM, 4
-	)
-	var warp2: FastNoiseLite = _make_noise(
-		"atlas_warp2", 0.0016, FastNoiseLite.FRACTAL_FBM, 3
-	)
-
-	var half: float = float(size) * 0.5
-	var collar_cells: int = _collar_cells()
-	# Keep a narrow soft sea belt inside the hard collar. The radial mass still
-	# prevents a square continent, but most of the atlas remains usable land.
-	var soft_margin: float = float(collar_cells) + float(size) * 0.02
-	for az in size:
-		for ax in size:
-			var idx: int = index_of(ax, az)
-			var edge_d: int = mini(
-				mini(ax, size - 1 - ax),
-				mini(az, size - 1 - az)
-			)
-			var hard_sea: bool = edge_d < collar_cells
-			var dxn: float = (float(ax) - half) / half
-			var dzn: float = (float(az) - half) / half
-			var radial: float = sqrt(dxn * dxn + dzn * dzn)
-			var wx: float = (
-				float(ax)
-				+ warp.get_noise_2d(float(ax), float(az)) * float(size) * 0.08
-				+ warp2.get_noise_2d(float(az), float(ax)) * float(size) * 0.05
-			)
-			var wz: float = (
-				float(az)
-				+ warp.get_noise_2d(float(ax) + 40.0, float(az) - 17.0) * float(size) * 0.08
-				+ warp2.get_noise_2d(float(ax) - 11.0, float(az) + 27.0) * float(size) * 0.05
-			)
-			var cont: float = continent.get_noise_2d(wx, wz)
-			var pen: float = peninsula.get_noise_2d(wx * 0.7, wz * 0.7)
-			var cut: float = coast_cut.get_noise_2d(wx, wz) * 0.5 + 0.5
-			# Mild oval bias (not a filled square): keeps one main landmass but
-			# lets noise chew deep bays and peninsulas into the shoreline.
-			var mass: float = 1.0 - clampf(radial * 0.88, 0.0, 1.20)
-			mass = smoothstep(-0.08, 0.82, mass)
-			var landness: float = cont * 0.66 + pen * 0.22 + mass * 0.56
-			# Ridged cuts carve gulfs; stronger near the outer third.
-			landness -= cut * lerpf(0.06, 0.30, clampf(radial, 0.0, 1.0))
-			# Keep a soft sea belt inside the hard collar so coasts are free-form.
-			var rim: float = smoothstep(
-				soft_margin, soft_margin + float(size) * 0.06, float(edge_d)
-			)
-			landness *= lerpf(0.34, 1.0, rim)
-			var is_land: bool = (not hard_sea) and landness > 0.08
-			land[idx] = 1 if is_land else 0
-
-			if not is_land:
-				var depth: float = clampf(0.55 - landness, 0.0, 1.0) * 32.0
-				elev_code[idx] = clampi(int(depth), 0, 32)
-				humidity[idx] = 255
-				relief[idx] = 0
-				continue
-
-			var ridge: float = mountain.get_noise_2d(wx * 0.9, wz * 0.9) * 0.5 + 0.5
-			var alpine: float = pow(ridge, 1.35) * smoothstep(0.2, 0.7, landness)
-			var code_f: float = 48.0 + landness * 70.0 + alpine * 130.0
-			code_f += relief_n.get_noise_2d(wx, wz) * 10.0
-			elev_code[idx] = clampi(int(code_f), 33, 255)
-			relief[idx] = clampi(int(alpine * 50.0 + relief_n.get_noise_2d(wz, wx) * 8.0 + 4.0), 0, 63)
-
-			var h: float = moist.get_noise_2d(wx, wz) * 0.5 + 0.5
-			h = lerpf(h, 0.85, clampf(radial, 0.0, 1.0) * 0.35) * 0.35 + h * 0.65
-			h -= alpine * 0.25
-			humidity[idx] = clampi(int(h * 255.0), 0, 255)
+	for i in count:
+		land[i] = land_src[i]
+		elev_code[i] = elev_src[i]
+		humidity[i] = hum_src[i]
+		relief[i] = rel_src[i]
 
 
 func _collar_cells() -> int:
@@ -1943,11 +1855,11 @@ func _build_roads(elev_code: PackedByteArray) -> void:
 	_road_channel_mask.resize(size * size)
 	for cell_variant in river_links:
 		_road_channel_mask[int(cell_variant)] = 1
-	_road_native = (
-		ClassDB.instantiate("OrrunGen") as RefCounted
-		if ClassDB.class_exists("OrrunGen")
-		else null
+	assert(
+		ClassDB.class_exists("OrrunGen"),
+		"OrrunGen is required for ContinentAtlas roads"
 	)
+	_road_native = ClassDB.instantiate("OrrunGen") as RefCounted
 
 	# Group by landmass and connect with a simple nearest-neighbour chain + star
 	# to the mass centroid node, then A* each segment on a coarse step.
@@ -2105,84 +2017,28 @@ func _route_and_stamp_road(
 func _road_astar(
 	start: int, goal: int, elev_code: PackedByteArray, river_adjacent: PackedByteArray
 ) -> PackedInt32Array:
-	if _road_native != null:
-		var path: Variant = _road_native.call(
-			"road_astar",
-			cells,
-			elev_code,
-			river_adjacent,
-			_road_channel_mask,
-			size,
-			start,
-			goal,
-			AtlasBiomes.Id.OCEAN,
-			AtlasBiomes.Id.LAKE,
-			AtlasBiomes.Id.ALPINE
-		)
-		if typeof(path) == TYPE_PACKED_INT32_ARRAY:
-			return path
-		push_error("OrrunGen.road_astar failed: %s" % [path])
-
-	# Coarse A* stepping by 1 cell; capped expansions for GDScript budgets.
-	var open: Array[int] = [start]
-	var came: Dictionary = {}
-	var gscore: Dictionary = {start: 0.0}
-	var goal_ax: int = goal % size
-	var goal_az: int = goal / size
-	var expansions: int = 0
-	var closed: Dictionary = {}
-
-	while not open.is_empty() and expansions < 20000:
-		expansions += 1
-		var best_i: int = 0
-		var best_f: float = INF
-		for i in open.size():
-			var c: int = open[i]
-			var ax: int = c % size
-			var az: int = c / size
-			var f: float = float(gscore[c]) + float(absi(ax - goal_ax) + absi(az - goal_az))
-			if f < best_f:
-				best_f = f
-				best_i = i
-		var current: int = open[best_i]
-		open.remove_at(best_i)
-		if current == goal:
-			return _reconstruct(came, current)
-		if closed.has(current):
-			continue
-		closed[current] = true
-		var cx: int = current % size
-		var cz: int = current / size
-		for k in 4:
-			var nx: int = cx + NEIGHBOR_DX[k * 2]
-			var nz: int = cz + NEIGHBOR_DZ[k * 2]
-			if not in_bounds(nx, nz):
-				continue
-			var nb: int = index_of(nx, nz)
-			var biome: int = AtlasPack.biome(cells[nb])
-			if biome == AtlasBiomes.Id.OCEAN or biome == AtlasBiomes.Id.LAKE:
-				continue
-			# Baseline stays above the Manhattan heuristic so discounts below
-			# never make it inadmissible; 1.0 is the cheapest reachable step.
-			var step: float = 1.45
-			step += float(AtlasPack.relief(cells[nb])) * 0.06
-			step += float(absi(int(elev_code[nb]) - int(elev_code[current]))) * 0.08
-			if biome == AtlasBiomes.Id.ALPINE:
-				step += 0.5
-			if river_links.has(nb):
-				# Parallel the channel rather than occupy it.
-				step += 0.55
-			elif river_adjacent[nb] != 0:
-				step -= 0.2
-			step -= minf(float(AtlasPack.population(cells[nb])) * 0.035, 0.45)
-			var tentative: float = float(gscore[current]) + maxf(step, 1.0)
-			if gscore.has(nb) and tentative >= float(gscore[nb]):
-				continue
-			came[nb] = current
-			gscore[nb] = tentative
-			open.append(nb)
-	return PackedInt32Array()
-
+	assert(
+		_road_native != null,
+		"OrrunGen is required for ContinentAtlas.road_astar"
+	)
+	var path: Variant = _road_native.call(
+		"road_astar",
+		cells,
+		elev_code,
+		river_adjacent,
+		_road_channel_mask,
+		size,
+		start,
+		goal,
+		AtlasBiomes.Id.OCEAN,
+		AtlasBiomes.Id.LAKE,
+		AtlasBiomes.Id.ALPINE
+	)
+	assert(
+		typeof(path) == TYPE_PACKED_INT32_ARRAY,
+		"OrrunGen.road_astar failed: %s" % [path]
+	)
+	return path
 
 func _reconstruct(came: Dictionary, current: int) -> PackedInt32Array:
 	var path: PackedInt32Array = PackedInt32Array()

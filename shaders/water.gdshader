@@ -1,5 +1,7 @@
 shader_type spatial;
-render_mode cull_disabled, blend_mix, depth_draw_never, diffuse_burley;
+// shadows_disabled: flat sheets pick up directional cascade splits as dark
+// crosses; the bed already shades under the translucent sheet.
+render_mode cull_disabled, blend_mix, depth_draw_never, diffuse_burley, shadows_disabled;
 
 // One material for rivers and lakes. Depth is read from the scene rather than
 // assumed, so the same shader works for a shallow ford and a deep tarn, and the

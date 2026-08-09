@@ -86,7 +86,10 @@ static func place(
 			# Nothing stands in a river. Wetness only thins a shoreline out;
 			# the water surface itself is a hard boundary, and a pine growing
 			# out of a lake is the single loudest way to lose the illusion.
-			if field.water_top[column] > surface_y - WATERLINE_MARGIN:
+			# WaterSurface also pulls dry corners of a wet quad up to the sheet,
+			# so a neighbour column under water is enough to put a trunk in the
+			# visible pond even when this sample stayed dry.
+			if _flooded_at(field, column, surface_y):
 				continue
 			var wetness: float = field.wetness[column]
 			var mask: float = field.corridor_mask[column]
@@ -178,6 +181,24 @@ static func _surface_hit(field: DensityField.Field, world_x: float, world_z: flo
 			var t: float = here / maxf(here - above, 0.0001)
 			return Vector2(field.origin.y + (float(iy) + t) * field.voxel, 1.0)
 	return Vector2(0.0, 0.0)
+
+
+static func _flooded_at(
+	field: DensityField.Field, column: int, surface_y: float
+) -> bool:
+	var samples: int = field.dims.x
+	var ix: int = column % samples
+	var iz: int = int(column / samples)
+	for dz in range(-1, 2):
+		for dx in range(-1, 2):
+			var nx: int = ix + dx
+			var nz: int = iz + dz
+			if nx < 0 or nz < 0 or nx >= samples or nz >= field.dims.z:
+				continue
+			var top: float = field.water_top[nz * samples + nx]
+			if top > surface_y - WATERLINE_MARGIN:
+				return true
+	return false
 
 
 static func column_of(field: DensityField.Field, world_x: float, world_z: float) -> int:

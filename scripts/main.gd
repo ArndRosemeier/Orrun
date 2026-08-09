@@ -3,16 +3,17 @@ extends Node3D
 ## Boots the world: generate the continent atlas, build the shared continental
 ## context, bake the sector the player will open in, then stream chunks.
 ##
-## The first acceptance scene is a river mouth. It is chosen from the atlas
-## alone - biggest river class, comfortably inside the continent - so the same
-## seed always opens on the same estuary, and the slice exercises the two
-## hardest seams at once: a trunk river crossing sector boundaries, and an
-## ocean shoreline shared by four sectors.
+## Boot lands at the last saved player position ([constant SESSION_PATH]), or at
+## [constant DEFAULT_SPAWN_XZ] on a fresh profile. Closing the window writes the
+## current continental position so the next launch resumes there.
 ##
 ## Generation runs on a worker so the window stays responsive, and the player is
 ## held frozen until there is real collision under the spawn point.
 
 const CATALOG_PATH: String = "res://assets/catalog/props.json"
+## Fresh-profile landing: ocean mouth repro (continental metres).
+const DEFAULT_SPAWN_XZ: Vector2 = Vector2(177930.0, 54553.0)
+const SESSION_PATH: String = "user://player_session.cfg"
 const TERRAIN_SHADER: String = "res://shaders/terrain.gdshader"
 const WATER_SHADER: String = "res://shaders/water.gdshader"
 
@@ -34,6 +35,7 @@ var _bake_task: int = -1
 var _bake_phase: int = 0
 var _baked_atlas: ContinentAtlas = null
 var _spawn_world: Vector3 = Vector3.ZERO
+var _spawn_yaw: float = 0.0
 var _spawn_pending: bool = false
 var _terrain_material: ShaderMaterial
 var _water_material: ShaderMaterial
@@ -50,11 +52,12 @@ func _ready() -> void:
 	_water_material = ShaderMaterial.new()
 	_water_material.shader = load(WATER_SHADER)
 
-	if ClassDB.class_exists("OrrunGen"):
-		var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
-		print("OrrunGen: %s" % [native.call("version")])
-	else:
-		push_warning("OrrunGen missing — sector flood uses GDScript fallback")
+	assert(
+		ClassDB.class_exists("OrrunGen"),
+		"OrrunGen native extension is required — run native/orrun_gen/build.bat"
+	)
+	var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
+	print("OrrunGen: %s" % [native.call("version")])
 
 	loading_label.text = "Charting %d km of continent..." % config.atlas_size
 	# Atlas generation stays on a worker. Typed class_name factories such as
@@ -80,31 +83,28 @@ func _complete_boot_from_atlas() -> void:
 	loading_label.text = "Building continental terrain..."
 	context = WorldContext.create(config, _baked_atlas)
 	_baked_atlas = null
-	loading_label.text = "Baking the river mouth..."
+	loading_label.text = "Baking the spawn sector..."
 	_bake_phase = 2
 	_bake_task = WorkerThreadPool.add_task(_bake_spawn_sector)
 
 
 func _bake_spawn_sector() -> void:
-	var mouths: Array[Dictionary] = WorldQuery.ranked_river_mouths(context)
-	if mouths.is_empty():
-		_boot_error = "Atlas produced no river mouths to open on"
-		return
-
 	var continental: ContinentalTerrain = context.sampler()
-	for mouth in mouths:
-		var position: Vector2 = mouth["position"]
-		var sector_coord: Vector2i = WorldCoords.sector_of(position.x, position.y)
-		var candidate: WorldSector = WorldSector.generate(context, sector_coord)
-		var landing: Vector3 = WorldQuery.spawn_beside_mouth(
-			candidate, continental, position
-		)
-		if landing == Vector3.INF:
-			continue
-		spawn_sector = candidate
-		_spawn_world = landing
+	var spawn: Dictionary = _resolve_spawn()
+	var spawn_xz: Vector2 = spawn["xz"]
+	_spawn_yaw = float(spawn["yaw"])
+	var sector_coord: Vector2i = WorldCoords.sector_of(spawn_xz.x, spawn_xz.y)
+	if not context.sector_in_atlas(sector_coord):
+		_boot_error = "Spawn is outside the atlas (%.0f, %.0f)" % [spawn_xz.x, spawn_xz.y]
 		return
-	_boot_error = "No river mouth had dry ground beside it"
+	spawn_sector = WorldSector.generate(context, sector_coord)
+	var ground: float = continental.height_at(spawn_xz.x, spawn_xz.y)
+	var saved_y: float = float(spawn["y"])
+	_spawn_world = Vector3(
+		spawn_xz.x,
+		saved_y if saved_y > -INF else ground,
+		spawn_xz.y
+	)
 
 
 func _process(_delta: float) -> void:
@@ -138,13 +138,21 @@ func _on_world_ready() -> void:
 		context.corridors.river_segment_count(), context.corridors.road_segment_count()
 	])
 	print("  spawn sector %s: %s" % [spawn_sector.sector, spawn_sector.bake_timings])
-	print("  %d river reaches, %d local lakes, %d roads, %d crossings" % [
+	print("  %d river reaches, %d local lakes, %d roads, %d crossings, %d houses" % [
 		spawn_sector.hydro.rivers.size(), spawn_sector.hydro.lakes.size(),
-		spawn_sector.paths.roads.size(), spawn_sector.paths.bridges.size()
+		spawn_sector.paths.roads.size(), spawn_sector.paths.bridges.size(),
+		spawn_sector.houses.size()
+	])
+	print("  spawn at %.0f, %.0f (claim: %s)" % [
+		_spawn_world.x, _spawn_world.z,
+		spawn_sector.claims.kind_at(_spawn_world.x, _spawn_world.z)
 	])
 
 	var specs: Array[PropPlacer.PropSpec] = PropPlacer.load_specs(CATALOG_PATH)
 	PropLibrary.load_catalog(specs, CATALOG_PATH)
+	var clutter_specs: Array[GroundClutter.Spec] = GroundClutter.load_specs()
+	PropLibrary.load_sources(GroundClutter.mesh_sources())
+	BridgeLibrary.load_catalog()
 
 	sectors = SectorManager.new(context)
 	sectors.adopt(spawn_sector)
@@ -158,7 +166,8 @@ func _on_world_ready() -> void:
 	)
 
 	streamer.setup(
-		context, sectors, player, specs, _terrain_material, _water_material
+		context, sectors, player, specs, _terrain_material, _water_material,
+		clutter_specs
 	)
 	hydro_map.build(sectors, player)
 	world_map.setup_for_game(context.atlas, player)
@@ -185,6 +194,7 @@ func _try_spawn() -> void:
 
 	var landing: Vector3 = hit["position"]
 	player.spawn_at_world(WorldOrigin.to_world(landing) + Vector3(0.0, 1.2, 0.0))
+	player.rotation.y = _spawn_yaw
 	_spawn_pending = false
 	loading_label.visible = false
 
@@ -280,7 +290,45 @@ func set_terrain_debug_view(view: int) -> void:
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_PREDELETE:
+		_save_session()
 		if streamer != null:
 			streamer.shutdown()
 		if sectors != null:
 			sectors.shutdown()
+
+
+## Keys: xz (Vector2), y (float, -INF if unknown), yaw (float).
+func _resolve_spawn() -> Dictionary:
+	var cfg: ConfigFile = ConfigFile.new()
+	if cfg.load(SESSION_PATH) == OK and cfg.has_section_key("player", "world_x"):
+		var xz: Vector2 = Vector2(
+			float(cfg.get_value("player", "world_x")),
+			float(cfg.get_value("player", "world_z"))
+		)
+		var span: float = context.config.continent_metres()
+		if xz.x >= 0.0 and xz.y >= 0.0 and xz.x < span and xz.y < span:
+			return {
+				"xz": xz,
+				"y": float(cfg.get_value("player", "world_y", -INF)),
+				"yaw": float(cfg.get_value("player", "yaw", 0.0)),
+			}
+		push_warning("Saved spawn outside atlas; using default ocean mouth")
+	return {"xz": DEFAULT_SPAWN_XZ, "y": -INF, "yaw": 0.0}
+
+
+func _save_session() -> void:
+	if player == null or player.frozen or context == null:
+		return
+	var world: Vector3 = player.world_position()
+	var cfg: ConfigFile = ConfigFile.new()
+	cfg.set_value("player", "world_x", world.x)
+	cfg.set_value("player", "world_y", world.y)
+	cfg.set_value("player", "world_z", world.z)
+	cfg.set_value("player", "yaw", player.rotation.y)
+	var err: Error = cfg.save(SESSION_PATH)
+	if err != OK:
+		push_error("Failed to save player session to %s (error %d)" % [SESSION_PATH, err])
+	else:
+		print(
+			"saved session -> %.0f, %.0f (yaw %.2f)" % [world.x, world.z, player.rotation.y]
+		)

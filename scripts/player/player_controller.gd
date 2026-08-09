@@ -11,6 +11,9 @@ extends CharacterBody3D
 @export var jump_velocity: float = 7.4
 @export var mouse_sensitivity: float = 0.0022
 @export var air_control: float = 0.35
+## Ground steeper than this becomes a wall. Default Godot is 45° — too timid
+## for Orrun banks, terraces, and bridge approaches.
+@export var max_walk_angle_deg: float = 78.0
 
 @onready var camera: Camera3D = $Camera3D
 
@@ -22,6 +25,9 @@ var _gravity: float = ProjectSettings.get_setting("physics/3d/default_gravity", 
 
 
 func _ready() -> void:
+	floor_max_angle = deg_to_rad(max_walk_angle_deg)
+	floor_snap_length = 0.45
+	floor_constant_speed = true
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 
@@ -81,7 +87,15 @@ func _physics_process(delta: float) -> void:
 
 	var control: float = 1.0 if is_on_floor() else air_control
 	var target: Vector3 = wish * speed
+	# Project wish onto the floor so steep grades stay walkable instead of
+	# fighting the normal as a wall.
+	if is_on_floor() and wish.length_squared() > 0.0001:
+		var along: Vector3 = wish.slide(get_floor_normal())
+		if along.length_squared() > 0.0001:
+			target = along.normalized() * speed
 	velocity.x = lerpf(velocity.x, target.x, control)
 	velocity.z = lerpf(velocity.z, target.z, control)
+	if is_on_floor() and wish.length_squared() > 0.0001:
+		velocity.y = lerpf(velocity.y, target.y, control)
 
 	move_and_slide()

@@ -85,6 +85,10 @@ Every river station carries its own `water_z`, monotonically descending
 downstream; every local lake carries the spill elevation of its own basin. Two
 lakes a kilometre apart sit at different heights and both are correct.
 
+River mouths into the ocean (and atlas lakes) blend the channel sheet down to
+the atlas water plane across `DensityField.ESTUARY_BLEND_METRES` so shore
+freeboard cannot lift the drape into a climbing canal and a vertical water wall.
+
 The ocean and the atlas lakes are the exception, and they have to be: a body of
 water that spans sectors cannot have a level that any one sector computes.
 Their surface comes from the atlas, and `ContinentalTerrain.water_plane_at`
@@ -253,9 +257,33 @@ spec and regenerated. `assets/catalog/props.json` declares placement rules
 (footprint, slope limit, water avoidance, road clearance, per-biome weight) and
 lists what the Asset Lab still owes us.
 
-Bridges are procedural boxes until the Asset Lab ships a span kit. The catalog
-id (`procedural_timber`, `procedural_stone`, `ford`) is the seam where a real
-kit drops in.
+Bridges use modular kits from `assets/catalog/bridges.json` (`timber` /
+`stone`): abutment + tiled mids + abutment. `BridgeSite.deck_z` is the single
+walking height: density applies settlement terraces first, then an axial bridge
+grade last (hard abutment apron at `deck_z`, eased inland ramp that cuts exit
+hills / fills entry gaps, water gap along the span only). The kit deck sits on
+the same number; LOD0 chunks assert flushness.
+Piers drop from the deck into the water. Missing kits fall back to boxes; `ford`
+is still a shallow walk-through with no structure.
+
+Settlement claims soft-terrace dry ground; each house also gets a tight terrace
+pad. Sites require flatter footprints, and `HousePlacer` seats on the lowest
+corner while burying most of an authored foundation plinth so grade bite does
+not look like a floating wall. Pads skip wet columns and fade out across the
+hydro corridor so rivers and lakes keep their carve. Village pads never run
+after bridge grades, so a plaza cannot pull an abutment off the deck.
+
+Ground clutter (`GroundClutter`, `assets/catalog/clutter.json`) is denser
+MultiMesh tufts than PropPlacer trees/rocks. It skips water, roads, steep rock
+and settlement cores, and picks lush/dry/sparse variants from a wetness curve
+plus biome weights — not a single humidity slider.
+
+Alpha settlements: each atlas `SETTLEMENT` node gets a clearing claim and a
+village green — a centrepiece (cottage, or rarely `house_hall_large`) plus a
+ring of huts/cabins facing the plaza (`SettlementLayout`). Sites stay clear of
+channels/lakes at bake; `HousePlacer` seats each slab on the lowest footprint
+corner so no corner floats. Houses are density 0 in `props.json`. Boot resumes
+from `user://player_session.cfg`, or the default ocean-mouth spawn.
 
 ## Testing
 

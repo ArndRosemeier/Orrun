@@ -31,6 +31,7 @@ var _pending_chunks: Dictionary = {}
 var _regions: Dictionary = {}
 var _ready_results: Array[ChunkJob] = []
 var _prop_specs: Array[PropPlacer.PropSpec] = []
+var _clutter_specs: Array[GroundClutter.Spec] = []
 
 var _terrain_material: Material
 var _water_material: Material
@@ -54,6 +55,10 @@ var _announced_first: bool = false
 ## Debug counters, read by the HUD.
 var stat_chunks_live: int = 0
 var stat_last_build_ms: int = 0
+var stat_last_density_ms: int = 0
+var stat_last_mesh_ms: int = 0
+var stat_last_water_ms: int = 0
+var stat_last_dress_ms: int = 0
 var stat_worst_contract_error: float = 0.0
 ## Which chunk produced that error. A contract breach is only actionable if you
 ## know where to go and look at it.
@@ -77,16 +82,19 @@ func setup(
 	player: Node3D,
 	specs: Array[PropPlacer.PropSpec],
 	terrain_material: Material,
-	water_material: Material
+	water_material: Material,
+	clutter_specs: Array[GroundClutter.Spec] = []
 ) -> void:
 	context = world_context
 	config = world_context.config
 	sectors = sector_manager
 	_player = player
 	_prop_specs = specs
+	_clutter_specs = clutter_specs
 	_terrain_material = terrain_material
 	_water_material = water_material
-	_queue = GenQueue.new()
+	# Prefer most of the machine for chunks; sector bakes stay on a smaller pool.
+	_queue = GenQueue.new(maxi(OS.get_processor_count() - 1, 3))
 
 	_far_terrain = FarTerrain.create(terrain_material)
 	add_child(_far_terrain)
@@ -191,7 +199,17 @@ func _refresh_desired(center: Vector2i) -> void:
 	stat_chunks_waiting_on_sector = waiting
 	_unload_outside(center, drop_radius)
 	_cancel_outside(center, drop_radius)
-	_queue.sort_waiting()
+	_queue.retarget_waiting(
+		func(job: GenQueue.Job) -> void:
+			if job is ChunkJob:
+				var c: Vector2i = (job as ChunkJob).chunk
+				job.priority = float(maxi(absi(c.x - center.x), absi(c.y - center.y)))
+			elif job is FarTerrainJob:
+				job.priority = 10000.0
+	)
+	_ready_results.sort_custom(
+		func(a: ChunkJob, b: ChunkJob) -> bool: return a.priority < b.priority
+	)
 
 
 func _lod_for_ring(ring: int) -> int:
@@ -229,10 +247,12 @@ func _queue_chunk(chunk: Vector2i, lod: int, priority: float) -> bool:
 	job.sector = sector
 	job.region = region
 	job.prop_specs = _prop_specs
+	job.clutter_specs = _clutter_specs
 	job.chunk = chunk
 	job.lod = lod
 	job.want_collision = lod == 0
-	job.want_props = lod == 0
+	job.want_props = lod == 0 and int(priority) <= config.props_max_ring
+	job.want_clutter = lod == 0 and int(priority) <= config.clutter_max_ring
 	job.priority = priority
 	job.mesh_epoch = mesh_epoch
 	_pending_chunks[key] = true
@@ -322,10 +342,22 @@ func _collect() -> void:
 
 
 func _instantiate_budgeted() -> void:
-	var budget: int = config.instantiate_budget
 	var drop_radius: int = (
 		config.lod_radius[config.lod_radius.size() - 1] + config.unload_hysteresis
 	)
+	var near_ready: int = 0
+	for job in _ready_results:
+		var ring: int = maxi(
+			absi(job.chunk.x - _last_center.x), absi(job.chunk.y - _last_center.y)
+		)
+		if ring <= 2:
+			near_ready += 1
+	var budget: int = config.instantiate_budget
+	if near_ready > 0:
+		budget = mini(
+			config.instantiate_budget_burst,
+			config.instantiate_budget + near_ready
+		)
 	while budget > 0 and not _ready_results.is_empty():
 		var job: ChunkJob = _ready_results.pop_front()
 		_pending_chunks.erase(WorldCoords.chunk_key(job.chunk))
@@ -355,6 +387,10 @@ func _install(job: ChunkJob) -> void:
 
 	stat_chunks_live = _chunks.size()
 	stat_last_build_ms = job.build_ms
+	stat_last_density_ms = job.density_ms
+	stat_last_mesh_ms = job.mesh_ms
+	stat_last_water_ms = job.water_ms
+	stat_last_dress_ms = job.dress_ms
 	if job.max_contract_error > stat_worst_contract_error:
 		stat_worst_contract_error = job.max_contract_error
 		stat_worst_contract_chunk = job.chunk

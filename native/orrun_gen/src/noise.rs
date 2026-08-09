@@ -66,3 +66,31 @@ impl Noise2D {
 		self.inner.get_noise_2d(x, y)
 	}
 }
+
+pub struct Noise3D {
+	inner: FastNoiseLite,
+}
+
+impl Noise3D {
+	pub fn from_period_fbm(
+		seed: i32,
+		period: f32,
+		octaves: i32,
+		gain: f32,
+		lacunarity: f32,
+	) -> Self {
+		let mut n = FastNoiseLite::with_seed(seed);
+		n.set_noise_type(Some(NoiseType::OpenSimplex2S));
+		n.set_fractal_type(Some(FractalType::FBm));
+		n.set_frequency(Some(1.0 / period));
+		n.set_fractal_octaves(Some(octaves));
+		n.set_fractal_gain(Some(gain));
+		n.set_fractal_lacunarity(Some(lacunarity));
+		Self { inner: n }
+	}
+
+	#[inline]
+	pub fn get(&self, x: f32, y: f32, z: f32) -> f32 {
+		self.inner.get_noise_3d(x, y, z)
+	}
+}

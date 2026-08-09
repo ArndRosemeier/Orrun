@@ -120,6 +120,12 @@ func _draw_claims(image: Image) -> void:
 				_dot(image, claim.center, Color(1.0, 0.95, 0.35), 3)
 			&"dungeon_mouth":
 				_dot(image, claim.center, Color(0.72, 0.35, 0.85), 2)
+	for site in _sector.houses:
+		var tone: Color = (
+			Color(0.95, 0.55, 0.2) if site.catalog_id == &"house_hall_large"
+			else Color(0.85, 0.78, 0.55)
+		)
+		_dot(image, Vector2(site.world_x, site.world_z), tone, 1)
 
 
 func _to_pixel(world_x: float, world_z: float) -> Vector2i:

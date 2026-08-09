@@ -196,8 +196,10 @@ extends Resource
 
 # --- Streaming -----------------------------------------------------------------------
 
-## Chunk results instantiated per frame on the main thread.
-@export var instantiate_budget: int = 2
+## Chunk results instantiated per frame on the main thread (floor).
+@export var instantiate_budget: int = 3
+## Extra installs per frame when near chunks are ready (capped).
+@export var instantiate_budget_burst: int = 5
 ## Player distance from the scene origin (m) that triggers an origin rebase.
 @export var origin_rebase_distance: float = 512.0
 ## Sectors kept in the LRU cache. 9 is the 3x3 the player can reach without a
@@ -212,6 +214,10 @@ extends Resource
 ## Prop candidate spacing in metres (jittered grid).
 @export var prop_spacing: float = 7.0
 @export var prop_max_slope_deg: float = 34.0
+## Chebyshev chunk rings that still place trees/rocks (LOD0 only).
+@export var props_max_ring: int = 3
+## Dense grass tufts — expensive; keep to the player's immediate ring.
+@export var clutter_max_ring: int = 1
 
 # --- Derived ---------------------------------------------------------------------------
 

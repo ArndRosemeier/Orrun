@@ -1,0 +1,35 @@
+{
+  "comment": "Ground-cover clutter (grass tufts). Scattered by GroundClutter, not PropPlacer. Meshes from Asset Lab via tools/sync_assets.py.",
+  "clutter": [
+    {
+      "id": "grass_tuft_lush",
+      "source": "grass_tuft_lush.glb",
+      "min_scale": 0.85,
+      "max_scale": 1.4,
+      "wet_center": 0.32,
+      "wet_sigma": 0.28,
+      "density": 1.35,
+      "biomes": { "plains": 1.0, "forest_hills": 0.9, "rocky_badlands": 0.1, "alpine": 0.25 }
+    },
+    {
+      "id": "grass_tuft_dry",
+      "source": "grass_tuft_dry.glb",
+      "min_scale": 0.7,
+      "max_scale": 1.25,
+      "wet_center": 0.1,
+      "wet_sigma": 0.22,
+      "density": 1.15,
+      "biomes": { "plains": 0.85, "forest_hills": 0.3, "rocky_badlands": 1.0, "alpine": 0.4 }
+    },
+    {
+      "id": "grass_tuft_sparse",
+      "source": "grass_tuft_sparse.glb",
+      "min_scale": 0.65,
+      "max_scale": 1.15,
+      "wet_center": 0.55,
+      "wet_sigma": 0.24,
+      "density": 0.85,
+      "biomes": { "plains": 0.45, "forest_hills": 0.55, "rocky_badlands": 0.25, "alpine": 0.65 }
+    }
+  ]
+}

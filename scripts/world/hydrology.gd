@@ -201,12 +201,16 @@ func _is_sink(index: int) -> bool:
 # --- Priority flood ---------------------------------------------------------------
 
 func _priority_flood() -> void:
+	assert(
+		ClassDB.class_exists("OrrunGen"),
+		"OrrunGen is required for Hydrology.priority_flood"
+	)
 	var n: int = terrain.cells
 	var count: int = n * n
 	var elevation: PackedFloat32Array = terrain.elevation
 
-	# Typed sinks for the native path (atlas water / trunk). Edge + outflow ports
-	# are still seeded inside OrrunGen.priority_flood / the GDScript fallback.
+	# Typed sinks (atlas water / trunk). Edge + outflow ports are seeded inside
+	# OrrunGen.priority_flood.
 	var sink_mask: PackedByteArray = PackedByteArray()
 	sink_mask.resize(count)
 	for i in count:
@@ -217,110 +221,34 @@ func _priority_flood() -> void:
 		if terrain.contains_local(cell.x, cell.y):
 			outflow_cells.append(cell.y * n + cell.x)
 
-	if ClassDB.class_exists("OrrunGen"):
-		var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
-		var result: Variant = native.call(
-			"priority_flood",
-			elevation,
-			sink_mask,
-			outflow_cells,
-			n,
-			terrain.min_elevation,
-			terrain.max_elevation,
-			LEVEL_STEP
-		)
-		if typeof(result) == TYPE_DICTIONARY:
-			var dict: Dictionary = result
-			filled = dict["filled"]
-			receiver = dict["receiver"]
-			flow_order = dict["flow_order"]
-			return
-		push_error("OrrunGen.priority_flood failed: %s" % [result])
-
-	filled = PackedFloat32Array()
-	filled.resize(count)
-	receiver = PackedInt32Array()
-	receiver.resize(count)
-	flow_order = PackedInt32Array()
-	flow_order.resize(count)
-
-	var visited: PackedByteArray = PackedByteArray()
-	visited.resize(count)
-
-	var base: float = terrain.min_elevation
-	var levels: int = int((terrain.max_elevation - base) / LEVEL_STEP) + 4
-	var buckets: Array[PackedInt32Array] = []
-	buckets.resize(levels)
-	for i in levels:
-		buckets[i] = PackedInt32Array()
-	var head: PackedInt32Array = PackedInt32Array()
-	head.resize(levels)
-
-	# Typed sinks, in place of the old whole-rim drain. Water leaves the sector
-	# into the sea, into an atlas lake, into an atlas trunk, or across the
-	# window edge - and never simply because the array ran out.
-	for cz in n:
-		for cx in n:
-			var index: int = cz * n + cx
-			var edge: bool = cx == 0 or cz == 0 or cx == n - 1 or cz == n - 1
-			if edge or sink_mask[index] != 0:
-				_seed(buckets, visited, elevation, index, base, levels)
-	for index in outflow_cells:
-		_seed(buckets, visited, elevation, index, base, levels)
-
-	var level: int = 0
-	var popped: int = 0
-	while level < levels:
-		if head[level] >= buckets[level].size():
-			level += 1
-			continue
-		var cell_index: int = buckets[level][head[level]]
-		head[level] += 1
-		flow_order[popped] = cell_index
-		popped += 1
-
-		var cx: int = cell_index % n
-		var cz: int = cell_index / n
-		var cell_filled: float = filled[cell_index]
-		for k in 8:
-			var nx: int = cx + NEIGHBOR_DX[k]
-			var nz: int = cz + NEIGHBOR_DZ[k]
-			if nx < 0 or nz < 0 or nx >= n or nz >= n:
-				continue
-			var nb: int = nz * n + nx
-			if visited[nb] != 0:
-				continue
-			visited[nb] = 1
-			var nb_filled: float = maxf(elevation[nb], cell_filled)
-			filled[nb] = nb_filled
-			receiver[nb] = cell_index
-			var nb_level: int = maxi(level, int((nb_filled - base) / LEVEL_STEP))
-			buckets[clampi(nb_level, 0, levels - 1)].append(nb)
-
-	assert(popped == count, "Priority flood left %d cells unreached" % (count - popped))
-
-
-func _seed(
-	buckets: Array[PackedInt32Array],
-	visited: PackedByteArray,
-	elevation: PackedFloat32Array,
-	index: int,
-	base: float,
-	levels: int
-) -> void:
-	if visited[index] != 0:
-		return
-	visited[index] = 1
-	filled[index] = elevation[index]
-	receiver[index] = -1
-	var level: int = clampi(int((elevation[index] - base) / LEVEL_STEP), 0, levels - 1)
-	buckets[level].append(index)
+	var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
+	var result: Variant = native.call(
+		"priority_flood",
+		elevation,
+		sink_mask,
+		outflow_cells,
+		n,
+		terrain.min_elevation,
+		terrain.max_elevation,
+		LEVEL_STEP
+	)
+	assert(
+		typeof(result) == TYPE_DICTIONARY,
+		"OrrunGen.priority_flood failed: %s" % [result]
+	)
+	var dict: Dictionary = result
+	filled = dict["filled"]
+	receiver = dict["receiver"]
+	flow_order = dict["flow_order"]
 
 
 # --- Flow accumulation --------------------------------------------------------------
 
 func _accumulate() -> void:
-	var count: int = filled.size()
+	assert(
+		ClassDB.class_exists("OrrunGen"),
+		"OrrunGen is required for Hydrology.accumulate"
+	)
 	var n: int = terrain.cells
 	var moisture: PackedFloat32Array = terrain.moisture
 	var inflow_boosts: PackedFloat32Array = PackedFloat32Array()
@@ -333,34 +261,24 @@ func _accumulate() -> void:
 			inflow_boosts.append(float(cell.y * n + cell.x))
 			inflow_boosts.append(config.river_accum_threshold * 0.5)
 
-	if ClassDB.class_exists("OrrunGen"):
-		var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
-		accumulation = native.call(
-			"accumulate", flow_order, receiver, moisture, inflow_boosts
-		)
-		return
-
-	accumulation = PackedFloat32Array()
-	accumulation.resize(count)
-	for i in count:
-		accumulation[i] = 0.55 + moisture[i] * 0.9
-	var b: int = 0
-	while b < inflow_boosts.size():
-		accumulation[int(inflow_boosts[b])] += inflow_boosts[b + 1]
-		b += 2
-
-	# flow_order runs downstream-first, so walking it backwards guarantees every
-	# contributor is finished before its receiver is touched.
-	for i in range(count - 1, -1, -1):
-		var cell_index: int = flow_order[i]
-		var down: int = receiver[cell_index]
-		if down >= 0:
-			accumulation[down] += accumulation[cell_index]
+	var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
+	var result: Variant = native.call(
+		"accumulate", flow_order, receiver, moisture, inflow_boosts
+	)
+	assert(
+		typeof(result) == TYPE_PACKED_FLOAT32_ARRAY,
+		"OrrunGen.accumulate failed: %s" % [result]
+	)
+	accumulation = result
 
 
 # --- Local lakes -----------------------------------------------------------------------
 
 func _find_lakes() -> void:
+	assert(
+		ClassDB.class_exists("OrrunGen"),
+		"OrrunGen is required for Hydrology.find_lakes"
+	)
 	var n: int = terrain.cells
 	var count: int = n * n
 	var elevation: PackedFloat32Array = terrain.elevation
@@ -370,124 +288,36 @@ func _find_lakes() -> void:
 	for i in count:
 		sink_mask[i] = 1 if _is_sink(i) else 0
 
-	if ClassDB.class_exists("OrrunGen"):
-		var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
-		var params: Dictionary = {
-			"cells": n,
-			"cell_size": terrain.cell_size,
-			"origin_x": terrain.origin_cell.x,
-			"origin_z": terrain.origin_cell.y,
-			"local_min_x": local_min.x,
-			"local_min_z": local_min.y,
-			"local_max_x": local_max.x,
-			"local_max_z": local_max.y,
-			"lake_epsilon": LAKE_EPSILON,
-			"local_lake_max_span": LOCAL_LAKE_MAX_SPAN,
-			"lake_min_cells": config.lake_min_cells,
-			"lake_max_cells": config.lake_max_cells,
-			"lake_min_depth": config.lake_min_depth,
-		}
-		var result: Variant = native.call(
-			"find_lakes",
-			elevation,
-			filled,
-			sink_mask,
-			receiver,
-			accumulation,
-			params
-		)
-		if typeof(result) == TYPE_DICTIONARY:
-			_apply_native_lakes(result)
-			return
-		push_error("OrrunGen.find_lakes failed: %s" % [result])
-
-	lake_id = PackedInt32Array()
-	lake_id.resize(count)
-	for i in count:
-		lake_id[i] = -1
-
-	var stack: PackedInt32Array = PackedInt32Array()
-	for start in count:
-		if lake_id[start] != -1:
-			continue
-		if filled[start] - elevation[start] <= LAKE_EPSILON:
-			continue
-
-		var surface: float = filled[start]
-		var lake: LakeData = LakeData.new()
-		lake.id = lakes.size()
-		lake.surface_z = surface
-
-		stack.clear()
-		stack.append(start)
-		lake_id[start] = lake.id
-		var members: PackedInt32Array = PackedInt32Array()
-		var deepest: float = 0.0
-		var min_x: float = INF
-		var min_z: float = INF
-		var max_x: float = -INF
-		var max_z: float = -INF
-		var rejected: bool = false
-
-		while not stack.is_empty():
-			var cell: int = stack[stack.size() - 1]
-			stack.resize(stack.size() - 1)
-			members.append(cell)
-			deepest = maxf(deepest, surface - elevation[cell])
-
-			var cx: int = cell % n
-			var cz: int = cell / n
-			# A local lake belongs to exactly one sector, and it has to stay
-			# clear of the boundary: a basin the neighbour also touches would be
-			# flooded twice, to two spill heights, with a step between them.
-			# Both sides apply this test to the same basin, so both reject it.
-			if not _in_local_domain(cell):
-				rejected = true
-			if sink_mask[cell] != 0:
-				rejected = true
-			var centre: Vector2 = terrain.cell_center(cx, cz)
-			min_x = minf(min_x, centre.x)
-			max_x = maxf(max_x, centre.x)
-			min_z = minf(min_z, centre.y)
-			max_z = maxf(max_z, centre.y)
-
-			for k in 8:
-				var nx: int = cx + NEIGHBOR_DX[k]
-				var nz: int = cz + NEIGHBOR_DZ[k]
-				if nx < 0 or nz < 0 or nx >= n or nz >= n:
-					continue
-				var nb: int = nz * n + nx
-				if lake_id[nb] != -1:
-					continue
-				if filled[nb] - elevation[nb] <= LAKE_EPSILON:
-					continue
-				if absf(filled[nb] - surface) > 0.02:
-					continue
-				lake_id[nb] = lake.id
-				stack.append(nb)
-
-		var span: float = maxf(max_x - min_x, max_z - min_z) + config.macro_cell_size
-		if (
-			rejected
-			or members.size() < config.lake_min_cells
-			or members.size() > config.lake_max_cells
-			or span > LOCAL_LAKE_MAX_SPAN
-			or deepest < config.lake_min_depth
-		):
-			for cell in members:
-				lake_id[cell] = -1
-			continue
-
-		lake.cells = members
-		lake.max_depth = deepest
-		var half: float = config.macro_cell_size * 0.5
-		lake.bounds = Rect2(
-			min_x - half, min_z - half,
-			(max_x - min_x) + config.macro_cell_size,
-			(max_z - min_z) + config.macro_cell_size
-		)
-		lake.outlet_cell = _find_outlet(lake)
-		lakes.append(lake)
+	var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
+	var params: Dictionary = {
+		"cells": n,
+		"cell_size": terrain.cell_size,
+		"origin_x": terrain.origin_cell.x,
+		"origin_z": terrain.origin_cell.y,
+		"local_min_x": local_min.x,
+		"local_min_z": local_min.y,
+		"local_max_x": local_max.x,
+		"local_max_z": local_max.y,
+		"lake_epsilon": LAKE_EPSILON,
+		"local_lake_max_span": LOCAL_LAKE_MAX_SPAN,
+		"lake_min_cells": config.lake_min_cells,
+		"lake_max_cells": config.lake_max_cells,
+		"lake_min_depth": config.lake_min_depth,
+	}
+	var result: Variant = native.call(
+		"find_lakes",
+		elevation,
+		filled,
+		sink_mask,
+		receiver,
+		accumulation,
+		params
+	)
+	assert(
+		typeof(result) == TYPE_DICTIONARY,
+		"OrrunGen.find_lakes failed: %s" % [result]
+	)
+	_apply_native_lakes(result)
 
 
 func _apply_native_lakes(result: Dictionary) -> void:
@@ -516,21 +346,6 @@ func _apply_native_lakes(result: Dictionary) -> void:
 			cells[j] = members[from_i + j]
 		lake.cells = cells
 		lakes.append(lake)
-
-
-func _find_outlet(lake: LakeData) -> int:
-	# The outlet is the member whose receiver leaves the basin: that is the cell
-	# the priority flood spilled through, so the outflow starts exactly there.
-	var best: int = -1
-	var best_acc: float = -1.0
-	for cell in lake.cells:
-		var down: int = receiver[cell]
-		if down < 0:
-			return cell
-		if lake_id[down] != lake.id and accumulation[cell] > best_acc:
-			best_acc = accumulation[cell]
-			best = cell
-	return best
 
 
 # --- Channels --------------------------------------------------------------------------
@@ -669,8 +484,72 @@ func _emit_trunk_reach(run: PackedInt32Array) -> void:
 		return
 	reach.points = points
 	reach.half_width = widths
+	_grade_ocean_mouth(reach)
 	reach.compute_bounds()
 	rivers.append(reach)
+
+
+## Pull stations near the ocean (or atlas water) down to the plane. The mouth
+## may sit mid-reach on a coastal trunk, so the tip is the lowest shore_d
+## station — not only an endpoint.
+func _grade_ocean_mouth(reach: RiverPolyline) -> void:
+	var blend: float = DensityField.ESTUARY_BLEND_METRES
+	var points: PackedVector3Array = reach.points
+	var n: int = points.size()
+	if n < 2:
+		return
+	var tip_i: int = 0
+	var tip_shore: float = INF
+	for i in n:
+		var sd: float = continental.shore_distance(points[i].x, points[i].z)
+		if sd < tip_shore:
+			tip_shore = sd
+			tip_i = i
+	if tip_shore > blend:
+		return
+	var plane: float = continental.water_plane_at(points[tip_i].x, points[tip_i].z)
+	# Graph distance along the polyline from the mouth station (both directions).
+	var dist: PackedFloat32Array = PackedFloat32Array()
+	dist.resize(n)
+	for i in n:
+		dist[i] = INF
+	dist[tip_i] = 0.0
+	for i in range(tip_i + 1, n):
+		dist[i] = dist[i - 1] + Vector2(
+			points[i].x - points[i - 1].x, points[i].z - points[i - 1].z
+		).length()
+	for i in range(tip_i - 1, -1, -1):
+		dist[i] = dist[i + 1] + Vector2(
+			points[i].x - points[i + 1].x, points[i].z - points[i + 1].z
+		).length()
+	# Pull / non-climb membership: near the mouth along the reach, and actually
+	# near the shore. Along-track alone buries highland shelves; shore-distance
+	# alone would flatten every coastal river to sea level.
+	var track_span: float = blend + 40.0
+	for j in n:
+		if dist[j] > track_span:
+			continue
+		var sd: float = continental.shore_distance(points[j].x, points[j].z)
+		if sd > blend:
+			continue
+		# Falloff by shore distance so freeboard berms are shaved; a station
+		# merely near the tip along-track with large shore_d is not pulled.
+		var t: float = 1.0 - clampf(sd / blend, 0.0, 1.0)
+		if points[j].y > plane:
+			points[j].y = lerpf(points[j].y, plane, t)
+	var order: Array[int] = []
+	for j in n:
+		if dist[j] > track_span:
+			continue
+		if continental.shore_distance(points[j].x, points[j].z) > blend:
+			continue
+		order.append(j)
+	order.sort_custom(func(a: int, b: int) -> bool: return dist[a] > dist[b])
+	var prev_y: float = INF
+	for j in order:
+		points[j].y = minf(points[j].y, prev_y)
+		prev_y = points[j].y
+	reach.points = points
 
 
 ## Water height for one station on a shared channel: the atlas (or drainage)
@@ -688,11 +567,26 @@ func _emit_trunk_reach(run: PackedInt32Array) -> void:
 ## ground within a hundred metres is the sea bed, and the river falls off the
 ## cliff as a wall of water.
 func _drape_water_station(world_x: float, ceiling: float, world_z: float) -> Vector3:
-	return Vector3(
-		world_x,
-		minf(continental.height_at(world_x, world_z), ceiling),
-		world_z
-	)
+	var land_z: float = continental.height_at(world_x, world_z)
+	var shore_d: float = continental.shore_distance(world_x, world_z)
+	var plane: float = continental.water_plane_at(world_x, world_z)
+	# Atlas-wet ocean/lake: the sheet is the atlas plane. Draping onto the
+	# shelf bed would put the mouth tens of metres under the sea and invent a
+	# waterfall on the last station.
+	if shore_d <= 0.0:
+		return Vector3(world_x, plane, world_z)
+	# Atlas cells can encode elevations below the global sea. Dry land is
+	# floored at sea level, so a submarine atlas ceiling would bury the sheet
+	# and then force an upward grade into the ocean.
+	ceiling = maxf(ceiling, continental.fields.sea_surface_z)
+	var water_z: float = minf(land_z, ceiling)
+	# Pull down only: freeboard berms can leave the drape above the sea plane.
+	# Never raise a low station to meet the ocean.
+	var blend: float = DensityField.ESTUARY_BLEND_METRES
+	if shore_d < blend and water_z > plane:
+		var t: float = 1.0 - clampf(shore_d / blend, 0.0, 1.0)
+		water_z = lerpf(water_z, plane, t)
+	return Vector3(world_x, water_z, world_z)
 
 
 # --- Port stubs ---------------------------------------------------------------------------
@@ -833,6 +727,15 @@ func _build_local_rivers(noise: NoiseSet) -> void:
 			if lake_id[down] != -1:
 				chain.append(down)
 				reach.ends_in_lake = lake_id[down]
+				# Keep walking into the basin so the tip is under open water, not
+				# stranded on the first shore cell (meander then leaves a dry berm).
+				var tip: int = down
+				for _step in 5:
+					var nxt: int = receiver[tip]
+					if nxt < 0 or lake_id[nxt] != reach.ends_in_lake:
+						break
+					tip = nxt
+					chain.append(tip)
 				break
 			if is_channel[down] == 0:
 				chain.append(down)
@@ -848,6 +751,11 @@ func _build_local_rivers(noise: NoiseSet) -> void:
 		_chain_to_polyline(reach, chain, n, noise)
 		if joined_shared:
 			_snap_to_shared(reach)
+		if reach.ends_in_lake < 0:
+			var tip_p: Vector3 = reach.points[reach.points.size() - 1]
+			reach.ends_in_lake = _nearest_lake_id_near(tip_p.x, tip_p.z, 3)
+		if reach.ends_in_lake >= 0:
+			_extend_reach_into_lake(reach)
 		for k in chain.size() - 1:
 			cell_owner[chain[k]] = reach.id
 		end_cells[reach.id] = chain[chain.size() - 1]
@@ -956,9 +864,112 @@ func _chain_to_polyline(
 	# re-apply a monotonic clamp afterwards: holding the sheet down across a
 	# bump buries it, and the river disappears under its own banks.
 	_drape_polyline(smooth)
+	_widen_steep_cascade(smooth, smooth_widths, reach.valley)
 
 	reach.points = smooth
 	reach.half_width = smooth_widths
+
+
+## Steep lake-to-lake (or hillside) drops keep order-1 half-width, so density
+## paints a thread in a dry gorge. Widen the wet ribbon on steep runs.
+func _widen_steep_cascade(
+	points: PackedVector3Array, widths: PackedFloat32Array, valley: float
+) -> void:
+	if points.size() < 3 or widths.size() != points.size():
+		return
+	var length: float = 0.0
+	for i in range(1, points.size()):
+		length += Vector2(
+			points[i].x - points[i - 1].x, points[i].z - points[i - 1].z
+		).length()
+	if length < config.macro_cell_size:
+		return
+	var drop: float = points[0].y - points[points.size() - 1].y
+	if drop < 6.0 or drop / length < 0.04:
+		return
+	var target: float = minf(maxf(valley * 0.35, config.river_width_base * 1.8), 10.0)
+	for i in widths.size():
+		widths[i] = maxf(widths[i], target)
+
+
+## Local lake id within [param max_cells] of a world point, or -1.
+func _nearest_lake_id_near(world_x: float, world_z: float, max_cells: int) -> int:
+	if lakes.is_empty():
+		return -1
+	var cell: Vector2i = terrain.local_cell_of(world_x, world_z)
+	var n: int = terrain.cells
+	var best_id: int = -1
+	var best_d: int = max_cells + 1
+	for dz in range(-max_cells, max_cells + 1):
+		for dx in range(-max_cells, max_cells + 1):
+			var x: int = cell.x + dx
+			var z: int = cell.y + dz
+			if not terrain.contains_local(x, z):
+				continue
+			var id: int = lake_id[z * n + x]
+			if id < 0:
+				continue
+			var d: int = maxi(absi(dx), absi(dz))
+			if d < best_d:
+				best_d = d
+				best_id = id
+	return best_id
+
+
+## Continues a lake-bound reach under the spill so density carves a continuous
+## mouth instead of a rounded stub ending on dry berm before the sheet.
+func _extend_reach_into_lake(reach: RiverPolyline) -> void:
+	if reach.ends_in_lake < 0 or reach.ends_in_lake >= lakes.size():
+		return
+	if reach.points.size() < 2:
+		return
+	var lake: LakeData = lakes[reach.ends_in_lake]
+	var tip: Vector3 = reach.points[reach.points.size() - 1]
+	var prev: Vector3 = reach.points[reach.points.size() - 2]
+	var dir: Vector2 = Vector2(tip.x - prev.x, tip.z - prev.z)
+	var centre: Vector2 = lake.bounds.get_center()
+	var to_centre: Vector2 = centre - Vector2(tip.x, tip.z)
+	if dir.length_squared() < 1.0:
+		dir = to_centre
+	elif to_centre.length_squared() > 1.0 and dir.dot(to_centre) < 0.0:
+		# Meander aimed back at the bank — prefer the basin.
+		dir = to_centre
+	if dir.length_squared() < 1.0:
+		return
+	dir = dir.normalized()
+
+	var half: float = reach.half_width[reach.half_width.size() - 1]
+	var step: float = config.macro_cell_size * 0.85
+	var max_ext: float = config.macro_cell_size * 4.0
+	var cursor: Vector2 = Vector2(tip.x, tip.z)
+	var travelled: float = 0.0
+	var inside_steps: int = 0
+	var n: int = terrain.cells
+	while travelled < max_ext:
+		cursor += dir * step
+		travelled += step
+		var cell: Vector2i = terrain.local_cell_of(cursor.x, cursor.y)
+		if not terrain.contains_local(cell.x, cell.y):
+			break
+		var idx: int = cell.y * n + cell.x
+		var water_z: float = minf(tip.y, lake.surface_z)
+		if lake_id[idx] == lake.id:
+			inside_steps += 1
+			water_z = lake.surface_z
+		elif inside_steps > 0:
+			break
+		reach.points.append(Vector3(cursor.x, water_z, cursor.y))
+		reach.half_width.append(half)
+		if inside_steps >= 3:
+			break
+
+	# Water must not rise toward the lake mouth.
+	for i in range(1, reach.points.size()):
+		var p: Vector3 = reach.points[i]
+		if p.y > reach.points[i - 1].y:
+			p.y = reach.points[i - 1].y
+			reach.points[i] = p
+	reach.compute_bounds()
 
 
 ## Pulls the last station of a brook onto the shared water it joins - an atlas

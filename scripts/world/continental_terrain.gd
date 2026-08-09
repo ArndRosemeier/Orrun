@@ -41,8 +41,6 @@ const SHORE_METRES_PER_UNIT: float = 500.0
 ## optimisation: a bin holds every corridor that could reach any cell in it, and
 ## corridors that turn out to be too far away are skipped per cell, so the
 ## number of bins cannot change the surface.
-const BIN_DIVISIONS: int = 16
-
 var config: WorldConfig
 var fields: AtlasFields
 var corridors: AtlasCorridors
@@ -144,117 +142,72 @@ func fill_window(
 	)
 	var river_bases: PackedInt32Array = corridors.rivers_in_rect(window)
 
-	if ClassDB.class_exists("OrrunGen"):
-		var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
-		var params: Dictionary = {
-			"origin_x": origin_cell.x,
-			"origin_z": origin_cell.y,
-			"cells": cells,
-			"macro_cell_size": cs,
-			"atlas_size": fields.size,
-			"continent_span": _continent_span,
-			"max_valley_radius": radius,
-			"trunk_valley_radius": config.trunk_valley_radius,
-			"trunk_valley_per_class": config.trunk_valley_per_class,
-			"trunk_bank_rise": config.trunk_bank_rise,
-			"swell_height": config.swell_height,
-			"mountain_detail": config.mountain_detail,
-			"mountain_octaves": config.mountain_octaves,
-			"mountain_gain": config.mountain_gain,
-			"mountain_sharpness": config.mountain_sharpness,
-			"mountain_macro_contrast": config.mountain_macro_contrast,
-			"warp_strength": config.warp_strength,
-			"ocean_floor_margin": config.ocean_floor_margin,
-			"inland_freeboard": config.inland_freeboard,
-			"relief_amp_plains": config.relief_amp_plains,
-			"relief_amp_hills": config.relief_amp_hills,
-			"relief_amp_mountains": config.relief_amp_mountains,
-			"seed_swell": config.layer_seed("swell"),
-			"seed_mountain": config.layer_seed("mountain"),
-			"seed_warp_a": config.layer_seed("warp_a"),
-			"seed_warp_b": config.layer_seed("warp_b"),
-			"seed_moisture": config.layer_seed("moisture"),
-			"seed_temperature": config.layer_seed("temperature"),
-			"seed_coast": config.layer_seed("coast"),
-			"swell_scale": config.swell_scale,
-			"mountain_noise_scale": config.mountain_noise_scale,
-			"warp_scale": config.warp_scale,
-		}
-		var result: Variant = native.call(
-			"fill_window",
-			fields.elevation_m,
-			fields.humidity01,
-			fields.relief01,
-			fields.water_flag,
-			fields.water_plane,
-			corridors.rivers,
-			river_bases,
-			params
-		)
-		if typeof(result) == TYPE_DICTIONARY:
-			var dict: Dictionary = result
-			var elev_src: PackedFloat32Array = dict["elevation"]
-			var rel_src: PackedFloat32Array = dict["relief_amp"]
-			var moist_src: PackedFloat32Array = dict["moisture"]
-			var temp_src: PackedFloat32Array = dict["temperature"]
-			var count: int = cells * cells
-			for i in count:
-				elevation[i] = elev_src[i]
-				relief_amp[i] = rel_src[i]
-				moisture[i] = moist_src[i]
-				temperature[i] = temp_src[i]
-			return
-		push_error("OrrunGen.fill_window failed: %s" % [result])
-
-	var bins: Array[PackedInt32Array] = _bin_rivers(river_bases, origin, span, radius)
-
-	for cz in cells:
-		var wz: float = (float(origin_cell.y + cz) + 0.5) * cs
-		var bz: int = clampi(int((wz - origin.y) / span * float(BIN_DIVISIONS)), 0, BIN_DIVISIONS - 1)
-		for cx in cells:
-			var wx: float = (float(origin_cell.x + cx) + 0.5) * cs
-			var bx: int = clampi(
-				int((wx - origin.x) / span * float(BIN_DIVISIONS)), 0, BIN_DIVISIONS - 1
-			)
-			var index: int = cz * cells + cx
-
-			var height: float = _base_height(wx, wz)
-			height = _carve_valleys(height, wx, wz, bins[bz * BIN_DIVISIONS + bx])
-			height = _shore_authority(height, wx, wz)
-
-			elevation[index] = height
-			relief_amp[index] = _relief_amp(
-				fields.sample_smooth(fields.relief01, wx, wz)
-			)
-			moisture[index] = _moisture(wx, wz)
-			temperature[index] = temperature_for(wx, wz, height)
-
-
-func _bin_rivers(
-	bases: PackedInt32Array, origin: Vector2, span: float, radius: float
-) -> Array[PackedInt32Array]:
-	var bins: Array[PackedInt32Array] = []
-	bins.resize(BIN_DIVISIONS * BIN_DIVISIONS)
-	for i in bins.size():
-		bins[i] = PackedInt32Array()
-	var bin_span: float = span / float(BIN_DIVISIONS)
-
-	for base in bases:
-		var reach: float = radius
-		var min_x: float = minf(corridors.rivers[base], corridors.rivers[base + 3]) - reach
-		var max_x: float = maxf(corridors.rivers[base], corridors.rivers[base + 3]) + reach
-		var min_z: float = minf(corridors.rivers[base + 2], corridors.rivers[base + 5]) - reach
-		var max_z: float = maxf(corridors.rivers[base + 2], corridors.rivers[base + 5]) + reach
-		var x0: int = clampi(floori((min_x - origin.x) / bin_span), 0, BIN_DIVISIONS - 1)
-		var x1: int = clampi(floori((max_x - origin.x) / bin_span), 0, BIN_DIVISIONS - 1)
-		var z0: int = clampi(floori((min_z - origin.y) / bin_span), 0, BIN_DIVISIONS - 1)
-		var z1: int = clampi(floori((max_z - origin.y) / bin_span), 0, BIN_DIVISIONS - 1)
-		if max_x < origin.x or max_z < origin.y:
-			continue
-		for bz in range(z0, z1 + 1):
-			for bx in range(x0, x1 + 1):
-				bins[bz * BIN_DIVISIONS + bx].append(base)
-	return bins
+	assert(
+		ClassDB.class_exists("OrrunGen"),
+		"OrrunGen is required for ContinentalTerrain.fill_window"
+	)
+	var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
+	var params: Dictionary = {
+		"origin_x": origin_cell.x,
+		"origin_z": origin_cell.y,
+		"cells": cells,
+		"macro_cell_size": cs,
+		"atlas_size": fields.size,
+		"continent_span": _continent_span,
+		"max_valley_radius": radius,
+		"trunk_valley_radius": config.trunk_valley_radius,
+		"trunk_valley_per_class": config.trunk_valley_per_class,
+		"trunk_bank_rise": config.trunk_bank_rise,
+		"swell_height": config.swell_height,
+		"mountain_detail": config.mountain_detail,
+		"mountain_octaves": config.mountain_octaves,
+		"mountain_gain": config.mountain_gain,
+		"mountain_sharpness": config.mountain_sharpness,
+		"mountain_macro_contrast": config.mountain_macro_contrast,
+		"warp_strength": config.warp_strength,
+		"ocean_floor_margin": config.ocean_floor_margin,
+		"inland_freeboard": config.inland_freeboard,
+		"sea_surface_z": fields.sea_surface_z,
+		"relief_amp_plains": config.relief_amp_plains,
+		"relief_amp_hills": config.relief_amp_hills,
+		"relief_amp_mountains": config.relief_amp_mountains,
+		"seed_swell": config.layer_seed("swell"),
+		"seed_mountain": config.layer_seed("mountain"),
+		"seed_warp_a": config.layer_seed("warp_a"),
+		"seed_warp_b": config.layer_seed("warp_b"),
+		"seed_moisture": config.layer_seed("moisture"),
+		"seed_temperature": config.layer_seed("temperature"),
+		"seed_coast": config.layer_seed("coast"),
+		"swell_scale": config.swell_scale,
+		"mountain_noise_scale": config.mountain_noise_scale,
+		"warp_scale": config.warp_scale,
+	}
+	var result: Variant = native.call(
+		"fill_window",
+		fields.elevation_m,
+		fields.humidity01,
+		fields.relief01,
+		fields.water_flag,
+		fields.water_plane,
+		corridors.rivers,
+		river_bases,
+		params
+	)
+	assert(
+		typeof(result) == TYPE_DICTIONARY,
+		"OrrunGen.fill_window failed: %s" % [result]
+	)
+	var dict: Dictionary = result
+	var elev_src: PackedFloat32Array = dict["elevation"]
+	var rel_src: PackedFloat32Array = dict["relief_amp"]
+	var moist_src: PackedFloat32Array = dict["moisture"]
+	var temp_src: PackedFloat32Array = dict["temperature"]
+	var count: int = cells * cells
+	for i in count:
+		elevation[i] = elev_src[i]
+		relief_amp[i] = rel_src[i]
+		moisture[i] = moist_src[i]
+		temperature[i] = temp_src[i]
 
 
 # --- Shape ---------------------------------------------------------------------------
@@ -338,15 +291,23 @@ func _carve_valleys(
 		# dam a valley that only digs trunk_bank_rise metres — common on orogen
 		# flanks — so require a gutter deep enough to beat that amplitude.
 		var relief01: float = fields.sample_smooth(fields.relief01, world_x, world_z)
+		# Cap contrast-driven gutter: unbounded trenches make coarse LOD chord
+		# across the slot and hide the river under bridged ground.
+		var contrast_gutter: float = minf(
+			maxf(config.mountain_macro_contrast - 1.0, 0.0) * 18.0 * relief01, 22.0
+		)
 		var detail_amp: float = (
 			config.mountain_detail * lerpf(0.35, 1.0, relief01) * 0.65
 			+ config.swell_height * lerpf(1.0, 0.4, relief01) * 0.35
-			+ maxf(config.mountain_macro_contrast - 1.0, 0.0) * 40.0 * relief01
+			+ contrast_gutter
 		)
 		var min_gutter: float = config.trunk_bank_rise + detail_amp
 		var atlas_floor: float = ay + (by - ay) * t + config.trunk_bank_rise
 		var floor_z: float = minf(atlas_floor, height - min_gutter)
 		floor_z = minf(floor_z, height)
+		# Do not dig dry land below global sea — coastal trunks must arrive at
+		# the ocean without sitting in a submarine trench.
+		floor_z = maxf(floor_z, fields.sea_surface_z)
 		var ramp: float = smoothstep(0.0, radius, d)
 		out = minf(out, lerpf(floor_z, height, ramp))
 	return out
@@ -355,6 +316,10 @@ func _carve_valleys(
 ## Forces the surface to respect the atlas coastline, and makes the waterline
 ## itself continuous: depth below and freeboard above both vanish at the zero
 ## of [method shore_signed], so land does not step into water.
+##
+## Dry land is never allowed below global sea level. Trunk valleys used to dig
+## coastal pits under the ocean plane; rivers then sat below the sea and the
+## estuary sheet had to climb to meet it.
 func _shore_authority(height: float, world_x: float, world_z: float) -> float:
 	var signed_shore: float = shore_signed(world_x, world_z)
 	var plane: float = water_plane_at(world_x, world_z)
@@ -364,9 +329,12 @@ func _shore_authority(height: float, world_x: float, world_z: float) -> float:
 		var depth: float = (config.ocean_floor_margin + SHELF_DEPTH * wetness) * wetness
 		return minf(height, plane - depth)
 
-	# Inland the plane belongs to whichever body is nearest, which stops being
-	# a meaningful statement a few hundred metres from the shore. The lift is
-	# therefore confined to the band where it is still true.
+	# Absolute floor: dry ground stays at or above the global sea, everywhere.
+	height = maxf(height, fields.sea_surface_z)
+
+	# Inland the local plane belongs to whichever body is nearest, which stops
+	# being a meaningful statement a few hundred metres from the shore. The
+	# freeboard lift is therefore confined to the band where it is still true.
 	var band: float = 1.0 - smoothstep(0.0, SHORE_OUTER, signed_shore)
 	if band <= 0.0:
 		return height

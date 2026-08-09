@@ -22,6 +22,9 @@ const WATER_FLOAT_TOLERANCE: float = 0.05
 ## close together after resampling, so this still allows a steep reach; what it
 ## forbids is the hundred-metre curtain of water from draping onto the sea bed.
 const MAX_STATION_DROP: float = 40.0
+## Coastal estuary grade may be steeper than inland reaches — still far below
+## the old sea-bed drape curtain.
+const MAX_ESTUARY_STATION_DROP: float = 50.0
 ## Default-seed estuary where an atlas trunk used to float ~9 m above the
 ## refined valley floor, with a local brook in the trench underneath.
 const FLOATING_TRUNK_REGRESSION_XZ: Vector2 = Vector2(179590.0, 86723.0)
@@ -31,6 +34,20 @@ const LAKE_HOLE_REGRESSION_XZ: Vector2 = Vector2(178258.0, 84542.0)
 ## Default-seed trunk where FarTerrain's coarse grid used to chord across the
 ## channel as a green land strip between two wet sheets.
 const FAR_BRIDGE_REGRESSION_XZ: Vector2 = Vector2(179009.0, 84375.0)
+## Default-seed ocean mouth where the trunk used to climb the shore berm then
+## meet the sea as a vertical water wall.
+const OCEAN_MOUTH_REGRESSION_XZ: Vector2 = Vector2(177930.0, 54553.0)
+## Default-seed coastal plain where a trunk used to carve a ~7 m bathtub that
+## read as a mini-lake (bridges/road under the sheet, trees on the banks).
+const COASTAL_LAGOON_REGRESSION_XZ: Vector2 = Vector2(177437.0, 55292.0)
+## Default-seed lake whose spill used to paint a floating sheet over the dry
+## slope beside the basin (through shore trees).
+const FLOATING_LAKE_REGRESSION_XZ: Vector2 = Vector2(131529.0, 158486.0)
+## Default-seed gorge between two lakes where mouth-pin used to drag the
+## cascade sheet down to the lower spill and leave a dry trench.
+const LAKE_CASCADE_REGRESSION_XZ: Vector2 = Vector2(132700.0, 158448.0)
+## Max |Δ water_top| between neighbouring channel samples into the ocean.
+const MAX_ESTUARY_SHEET_STEP: float = 3.5
 
 var failures: int = 0
 var checks: int = 0
@@ -65,6 +82,10 @@ func _initialize() -> void:
 	_test_floating_trunk_regression()
 	_test_lake_does_not_punch_holes_in_rivers()
 	_test_far_terrain_does_not_bridge_rivers()
+	_test_ocean_mouth_does_not_climb()
+	_test_coastal_trunk_is_not_a_lagoon()
+	_test_lake_sheet_does_not_float_beside_basin()
+	_test_lake_cascade_keeps_its_sheet()
 
 	print("---")
 	print("bake %d ms | %d checks | %d failures" % [bake_ms, checks, failures])
@@ -243,7 +264,7 @@ func _test_floating_trunk_regression() -> void:
 		report["offenders"] == 0,
 		"(%d floating stations, worst +%.3f m)" % [report["offenders"], report["worst"]])
 	_check("shared water does not plunge at the estuary",
-		report["worst_drop"] <= MAX_STATION_DROP,
+		report["worst_drop"] <= MAX_ESTUARY_STATION_DROP,
 		"(worst drop %.1f m)" % report["worst_drop"])
 
 	var continental: ContinentalTerrain = context.sampler()
@@ -421,6 +442,368 @@ func _test_far_terrain_does_not_bridge_rivers() -> void:
 		"(%d stations, %d above bed, worst %+0.2f m at %.0f,%.0f)" % [
 			checked, above_bed, worst_over, sample_at.x, sample_at.y
 		]
+	)
+
+
+## Trunk used to climb shore freeboard then meet the ocean as a vertical sheet.
+## Dry land used to dig below sea level so the sheet had to rise into the ocean.
+func _test_ocean_mouth_does_not_climb() -> void:
+	print("- regression: ocean mouth sheet descends to the sea")
+	var config: WorldConfig = WorldConfig.new()
+	var atlas: ContinentAtlas = ContinentAtlas.generate(config.seed, config.atlas_size)
+	var context: WorldContext = WorldContext.create(config, atlas)
+	var continental: ContinentalTerrain = context.sampler()
+	var sea: float = continental.fields.sea_surface_z
+	var at: Vector2 = OCEAN_MOUTH_REGRESSION_XZ
+	var sector: WorldSector = WorldSector.generate(
+		context, WorldCoords.sector_of(at.x, at.y)
+	)
+	var noise: NoiseSet = NoiseSet.create(config)
+	var near: Dictionary = sector.hydro.nearest_reach(at.x, at.y, 200.0)
+	_check(
+		"ocean-mouth regression has a trunk",
+		not near.is_empty() and sector.hydro.rivers[int(near["reach"])].is_trunk,
+		""
+	)
+	if near.is_empty():
+		return
+	var reach: RiverPolyline = sector.hydro.rivers[int(near["reach"])]
+	# Dry land around the mouth must sit at or above the global sea.
+	var dry_below: int = 0
+	var dry_checked: int = 0
+	var worst_dry: float = 0.0
+	for dz in range(-6, 7):
+		for dx in range(-6, 7):
+			var wx: float = at.x + float(dx) * 24.0
+			var wz: float = at.y + float(dz) * 24.0
+			if continental.shore_distance(wx, wz) <= 0.0:
+				continue
+			dry_checked += 1
+			var h: float = continental.height_at(wx, wz)
+			if h < sea - 0.05:
+				dry_below += 1
+				worst_dry = minf(worst_dry, h - sea)
+	_check(
+		"dry land near ocean mouth stays at/above sea level",
+		dry_checked >= 8 and dry_below == 0,
+		"(%d dry samples, %d below sea, worst %+0.2f m)" % [
+			dry_checked, dry_below, worst_dry
+		]
+	)
+	# Stations must not climb toward the ocean tip (graph distance → tip).
+	var tip_i: int = 0
+	var tip_shore: float = INF
+	for i in reach.points.size():
+		var sd: float = continental.shore_distance(reach.points[i].x, reach.points[i].z)
+		if sd < tip_shore:
+			tip_shore = sd
+			tip_i = i
+	var dist: PackedFloat32Array = PackedFloat32Array()
+	dist.resize(reach.points.size())
+	for i in reach.points.size():
+		dist[i] = INF
+	dist[tip_i] = 0.0
+	for i in range(tip_i + 1, reach.points.size()):
+		dist[i] = dist[i - 1] + Vector2(
+			reach.points[i].x - reach.points[i - 1].x,
+			reach.points[i].z - reach.points[i - 1].z
+		).length()
+	for i in range(tip_i - 1, -1, -1):
+		dist[i] = dist[i + 1] + Vector2(
+			reach.points[i].x - reach.points[i + 1].x,
+			reach.points[i].z - reach.points[i + 1].z
+		).length()
+	var order: Array[int] = []
+	for i in reach.points.size():
+		if dist[i] > DensityField.ESTUARY_BLEND_METRES + 40.0:
+			continue
+		if continental.shore_distance(reach.points[i].x, reach.points[i].z) > (
+			DensityField.ESTUARY_BLEND_METRES + 40.0
+		):
+			continue
+		if Vector2(reach.points[i].x - at.x, reach.points[i].z - at.y).length() > 280.0:
+			continue
+		order.append(i)
+	order.sort_custom(func(a: int, b: int) -> bool: return dist[a] > dist[b])
+	var climb: float = 0.0
+	var prev_y: float = INF
+	for j in order:
+		var y: float = reach.points[j].y
+		if prev_y < INF and y > prev_y + 0.05:
+			climb = maxf(climb, y - prev_y)
+		prev_y = y
+	_check(
+		"trunk stations do not climb toward the ocean",
+		climb <= 0.05,
+		"(worst climb %+0.2f m)" % climb
+	)
+	# Only score steps between consecutive wet stations — skips must not invent cliffs.
+	var worst_step: float = 0.0
+	var wet_count: int = 0
+	var ocean_hits: int = 0
+	var ocean_off: int = 0
+	var worst_float: float = 0.0
+	var prev_i: int = -1
+	var prev_top: float = 0.0
+	for i in reach.points.size():
+		var p: Vector3 = reach.points[i]
+		if Vector2(p.x - at.x, p.z - at.y).length() > 280.0:
+			prev_i = -1
+			continue
+		var shore_d: float = continental.shore_distance(p.x, p.z)
+		if shore_d > DensityField.ESTUARY_BLEND_METRES + 40.0:
+			prev_i = -1
+			continue
+		var chunk: Vector2i = WorldCoords.chunk_of(config, p.x, p.z)
+		var field: DensityField.Field = DensityField.build(
+			config, sector, continental, noise, chunk, 0
+		)
+		var ix: int = clampi(
+			int(round((p.x - field.origin.x) / field.voxel)), 0, field.dims.x - 1
+		)
+		var iz: int = clampi(
+			int(round((p.z - field.origin.z) / field.voxel)), 0, field.dims.z - 1
+		)
+		var col: int = field.column_index(ix, iz)
+		var top: float = field.water_top[col]
+		if top <= -INF:
+			prev_i = -1
+			continue
+		wet_count += 1
+		var plane: float = continental.water_plane_at(p.x, p.z)
+		if shore_d <= 0.0:
+			ocean_hits += 1
+			if absf(top - plane) > 0.35:
+				ocean_off += 1
+		elif shore_d < DensityField.ESTUARY_BLEND_METRES:
+			# Sheet must not ride above the continental bed (raised canal).
+			var land: float = continental.height_at(p.x, p.z)
+			worst_float = maxf(worst_float, top - land)
+		if prev_i == i - 1:
+			worst_step = maxf(worst_step, absf(top - prev_top))
+		prev_i = i
+		prev_top = top
+	_check("ocean-mouth has wet estuary samples", wet_count >= 4,
+		"(%d samples)" % wet_count)
+	_check(
+		"estuary sheet steps gently into the ocean",
+		worst_step <= MAX_ESTUARY_SHEET_STEP and wet_count >= 4,
+		"(worst step %.2f m, allow %.2f m)" % [worst_step, MAX_ESTUARY_SHEET_STEP]
+	)
+	_check(
+		"atlas-wet mouth columns sit on the sea plane",
+		ocean_hits > 0 and ocean_off == 0,
+		"(%d ocean samples, %d off plane)" % [ocean_hits, ocean_off]
+	)
+	_check(
+		"estuary sheet does not float above the continental bed",
+		worst_float <= WATER_FLOAT_TOLERANCE,
+		"(worst %+0.2f m)" % worst_float
+	)
+
+
+## Coastal shelf + full trunk depth used to dig a bathtub that read as a lake:
+## duplicate bridge kits, roads under the sheet, trees on flooded banks.
+func _test_coastal_trunk_is_not_a_lagoon() -> void:
+	print("- regression: coastal trunk is not a carved lagoon")
+	var config: WorldConfig = WorldConfig.new()
+	var atlas: ContinentAtlas = ContinentAtlas.generate(config.seed, config.atlas_size)
+	var context: WorldContext = WorldContext.create(config, atlas)
+	var continental: ContinentalTerrain = context.sampler()
+	var at: Vector2 = COASTAL_LAGOON_REGRESSION_XZ
+	var sector: WorldSector = WorldSector.generate(
+		context, WorldCoords.sector_of(at.x, at.y)
+	)
+	var noise: NoiseSet = NoiseSet.create(config)
+	var plane: float = continental.water_plane_at(at.x, at.y)
+	var deep: int = 0
+	var wet: int = 0
+	var worst_bed: float = 0.0
+	for dz in range(-10, 11):
+		for dx in range(-10, 11):
+			var wx: float = at.x + float(dx) * 12.0
+			var wz: float = at.y + float(dz) * 12.0
+			var h: float = continental.height_at(wx, wz)
+			if h > plane + 10.0:
+				continue
+			if continental.shore_distance(wx, wz) > DensityField.COASTAL_BED_BLEND_METRES:
+				continue
+			var chunk: Vector2i = WorldCoords.chunk_of(config, wx, wz)
+			var field: DensityField.Field = DensityField.build(
+				config, sector, continental, noise, chunk, 0
+			)
+			var ix: int = clampi(
+				int(round((wx - field.origin.x) / field.voxel)), 0, field.dims.x - 1
+			)
+			var iz: int = clampi(
+				int(round((wz - field.origin.z) / field.voxel)), 0, field.dims.z - 1
+			)
+			var col: int = field.column_index(ix, iz)
+			if field.water_top[col] <= -INF:
+				continue
+			wet += 1
+			var below: float = plane - field.surface_z[col]
+			worst_bed = maxf(worst_bed, below)
+			if below > DensityField.COASTAL_BED_MAX_BELOW_PLANE + 0.35:
+				deep += 1
+	_check(
+		"coastal lagoon site still has channel water",
+		wet >= 4,
+		"(%d wet samples)" % wet
+	)
+	_check(
+		"coastal shelf channel bed stays shallow",
+		deep == 0 and wet >= 4,
+		"(%d deep columns, worst %.2f m below sea plane, allow %.2f m)" % [
+			deep, worst_bed, DensityField.COASTAL_BED_MAX_BELOW_PLANE + 0.35
+		]
+	)
+	var dupes: int = 0
+	for i in sector.paths.bridges.size():
+		var a: BridgeSite = sector.paths.bridges[i]
+		var ca: Vector3 = a.center()
+		if Vector2(ca.x, ca.z).distance_to(at) > 280.0:
+			continue
+		for j in range(i + 1, sector.paths.bridges.size()):
+			var b: BridgeSite = sector.paths.bridges[j]
+			var cb: Vector3 = b.center()
+			if Vector2(ca.x - cb.x, ca.z - cb.z).length() < 24.0:
+				dupes += 1
+	_check(
+		"coastal crossings are not duplicated",
+		dupes == 0,
+		"(%d pairs within 24 m)" % dupes
+	)
+
+
+## Lake spill proximity used to wet slopes below the spill but outside the
+## basin, floating a sheet above dry ground and through shore trees.
+func _test_lake_sheet_does_not_float_beside_basin() -> void:
+	print("- regression: lake sheet does not float beside its basin")
+	var config: WorldConfig = WorldConfig.new()
+	var atlas: ContinentAtlas = ContinentAtlas.generate(config.seed, config.atlas_size)
+	var context: WorldContext = WorldContext.create(config, atlas)
+	var continental: ContinentalTerrain = context.sampler()
+	var at: Vector2 = FLOATING_LAKE_REGRESSION_XZ
+	var sector: WorldSector = WorldSector.generate(
+		context, WorldCoords.sector_of(at.x, at.y)
+	)
+	var noise: NoiseSet = NoiseSet.create(config)
+	var floaters: int = 0
+	var worst: float = 0.0
+	var worst_at: Vector2 = Vector2.ZERO
+	var members_wet: int = 0
+	for dz in range(-16, 17):
+		for dx in range(-16, 17):
+			var wx: float = at.x + float(dx) * 10.0
+			var wz: float = at.y + float(dz) * 10.0
+			var chunk: Vector2i = WorldCoords.chunk_of(config, wx, wz)
+			var field: DensityField.Field = DensityField.build(
+				config, sector, continental, noise, chunk, 0
+			)
+			var ix: int = clampi(
+				int(round((wx - field.origin.x) / field.voxel)), 0, field.dims.x - 1
+			)
+			var iz: int = clampi(
+				int(round((wz - field.origin.z) / field.voxel)), 0, field.dims.z - 1
+			)
+			var col: int = field.column_index(ix, iz)
+			var top: float = field.water_top[col]
+			if top <= -INF:
+				continue
+			# Judge the column's own sample point — query wx,wz can sit in a dry
+			# macro cell while the nearest density column is a lake member.
+			var world: Vector3 = field.sample_world_position(ix, 0, iz)
+			var h: float = sector.terrain.height_at(world.x, world.z)
+			var lid: int = sector.hydro.lake_at(world.x, world.z)
+			if lid >= 0:
+				members_wet += 1
+				continue
+			# Non-member wet columns may only be a shallow shore skirt (or river).
+			var inundation: float = top - h
+			if inundation > DensityField.LAKE_SHORE_MAX_INUNDATION + 0.75:
+				# Ignore ordinary river channels.
+				var reach: Dictionary = sector.hydro.nearest_reach(
+					world.x, world.z, 48.0
+				)
+				var in_river: bool = (
+					not reach.is_empty()
+					and float(reach["distance"]) <= float(reach["half_width"]) * 1.1
+				)
+				if in_river:
+					continue
+				floaters += 1
+				if inundation > worst:
+					worst = inundation
+					worst_at = Vector2(world.x, world.z)
+	_check(
+		"floating-lake site still has wet lake members nearby",
+		members_wet >= 4,
+		"(%d member samples)" % members_wet
+	)
+	_check(
+		"non-member columns are not under a deep floating lake sheet",
+		floaters == 0,
+		"(%d floaters, worst %.2f m above land at %.0f,%.0f)" % [
+			floaters, worst, worst_at.x, worst_at.y
+		]
+	)
+
+
+## A steep reach into a lower lake used to have its mid-gorge sheet pinned to
+## the lake spill (~80 m early), carving the trench dry above a buried ribbon.
+func _test_lake_cascade_keeps_its_sheet() -> void:
+	print("- regression: lake-to-lake cascade keeps its sheet")
+	var config: WorldConfig = WorldConfig.new()
+	var atlas: ContinentAtlas = ContinentAtlas.generate(config.seed, config.atlas_size)
+	var context: WorldContext = WorldContext.create(config, atlas)
+	var continental: ContinentalTerrain = context.sampler()
+	var at: Vector2 = LAKE_CASCADE_REGRESSION_XZ
+	var sector: WorldSector = WorldSector.generate(
+		context, WorldCoords.sector_of(at.x, at.y)
+	)
+	var noise: NoiseSet = NoiseSet.create(config)
+	var near: Dictionary = sector.hydro.nearest_reach(at.x, at.y, 40.0)
+	_check("cascade regression has a reach", not near.is_empty(), "")
+	if near.is_empty():
+		return
+	var reach: RiverPolyline = sector.hydro.rivers[int(near["reach"])]
+	var station: Vector3 = Vector3.ZERO
+	var best_d: float = INF
+	for p in reach.points:
+		var d: float = Vector2(p.x - at.x, p.z - at.y).length()
+		if d < best_d:
+			best_d = d
+			station = p
+	var chunk: Vector2i = WorldCoords.chunk_of(config, station.x, station.z)
+	var field: DensityField.Field = DensityField.build(
+		config, sector, continental, noise, chunk, 0
+	)
+	var ix: int = clampi(
+		int(round((station.x - field.origin.x) / field.voxel)), 0, field.dims.x - 1
+	)
+	var iz: int = clampi(
+		int(round((station.z - field.origin.z) / field.voxel)), 0, field.dims.z - 1
+	)
+	var col: int = field.column_index(ix, iz)
+	var top: float = field.water_top[col]
+	var clearance: float = top - field.surface_z[col] if top > -INF else 0.0
+	_check(
+		"cascade centreline is wet",
+		top > -INF,
+		"(station %.0f,%.0f y=%.2f)" % [station.x, station.z, station.y]
+	)
+	_check(
+		"cascade sheet stays near the draped station",
+		top > -INF and top >= station.y - 2.0,
+		"(water %s, station %.2f m)" % [
+			"dry" if top == -INF else "%.2f m" % top, station.y
+		]
+	)
+	_check(
+		"cascade has visible bed clearance",
+		clearance >= DensityField.MIN_VISIBLE_WATER_CLEARANCE + 0.2,
+		"(clearance %.2f m)" % clearance
 	)
 
 

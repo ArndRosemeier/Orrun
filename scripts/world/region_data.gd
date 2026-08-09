@@ -18,6 +18,7 @@ var rivers: Array[RiverPolyline] = []
 var lakes: Array[LakeData] = []
 var roads: Array[RoadEdge] = []
 var bridges: Array[BridgeSite] = []
+var houses: Array[HouseSite] = []
 var claims: Array[ClaimMask.Claim] = []
 
 ## Elevation span, used by the streamer to size vertical work.
@@ -52,6 +53,7 @@ static func build(sector: WorldSector, region_coord: Vector2i) -> RegionData:
 
 	data.lakes = sector.lakes_in_rect(padded)
 	data.bridges = sector.bridges_in_rect(padded)
+	data.houses = sector.houses_in_rect(padded)
 	data.claims = sector.claims.claims_in_rect(padded)
 
 	var lowest: float = INF

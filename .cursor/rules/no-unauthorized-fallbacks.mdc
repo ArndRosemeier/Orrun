@@ -1,0 +1,20 @@
+---
+description: Fallbacks of any kind require explicit user authorization
+alwaysApply: true
+---
+
+# No unauthorized fallbacks
+
+Do **not** add, keep, or invent fallbacks unless the user has explicitly authorized that specific fallback in the conversation (or an existing user/project rule already permits it).
+
+Fallbacks include, but are not limited to:
+
+- Silent GDScript (or other) stand-ins when a native/extension path fails or is missing
+- Default/dummy values that hide missing data, failed I/O, or broken contracts
+- Try/catch or soft error paths that continue with degraded behavior instead of failing loud
+- “Best effort” alternate algorithms that mask the primary path being wrong or unavailable
+- Compatibility shims that paper over incorrect results so the app still “works”
+
+When the primary path is unavailable or fails: **assert, error, or stop** with a clear message. Do not bury the failure.
+
+If a fallback seems necessary, **ask first** and wait for authorization before implementing it.
