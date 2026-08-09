@@ -1,11 +1,20 @@
 extends Node
 ## Renders the world from a few chosen viewpoints and writes PNGs to docs/shots.
 ##
+## Ground level is read from the continental surface rather than from a bake, so
+## a viewpoint may sit anywhere on the continent; the streamer bakes whatever
+## sector it lands in while the shot waits for its chunk.
+##
 ##   godot --path <project> --resolution 1600x900 res://tools/tests/screenshots.tscn
 ##
 ## Needs a real rendering device, so unlike the other tests this one opens a
 ## window. It is how the landscape gets judged: plains, a trunk river, a lake, a
 ## bridge crossing, high relief and a cave mouth, all from the same seed.
+##
+## Subjects - a particular river, lake or bridge - come from the sector the game
+## spawns in, because that is the one sector already baked. High ground does
+## not: a spawn beside a river mouth is coastal lowland by definition, and its
+## tallest hill is not a mountain shot.
 
 const OUTPUT_DIR: String = "res://docs/shots"
 const SETTLE_FRAMES: int = 30
@@ -23,6 +32,7 @@ var main: MainWorld
 var streamer: Streamer
 var player: PlayerController
 var camera: Camera3D
+var continental: ContinentalTerrain
 
 var shots: Array[Shot] = []
 var index: int = -1
@@ -122,7 +132,7 @@ func _process(_delta: float) -> void:
 	print("  %s  (%s)" % [path, shot.caption])
 	print("      eye %.0f,%.0f,%.0f | ground %.0f m | %d chunks | waited %d frames" % [
 		eye_world.x, eye_world.y, eye_world.z,
-		streamer.map.terrain.height_at(eye_world.x, eye_world.z),
+		continental.height_at(eye_world.x, eye_world.z),
 		streamer.stat_chunks_live, wait_frames
 	])
 	capturing = false
@@ -220,7 +230,7 @@ func _advance() -> void:
 func _add(
 	name: String, eye_xz: Vector2, above_ground: float, target: Vector3, caption: String
 ) -> void:
-	var ground: float = streamer.map.terrain.height_at(eye_xz.x, eye_xz.y)
+	var ground: float = continental.height_at(eye_xz.x, eye_xz.y)
 	var shot: Shot = Shot.new()
 	shot.name = name
 	shot.eye = Vector3(eye_xz.x, maxf(ground, target.y) + above_ground, eye_xz.y)
@@ -230,7 +240,8 @@ func _add(
 
 
 func _choose_shots() -> void:
-	var map: WorldMap = streamer.map
+	var map: WorldSector = main.spawn_sector
+	continental = main.context.sampler()
 
 	# A high, steeply angled view first: if the landscape is wrong at all, it is
 	# obvious here, and every ground-level shot after it can be trusted or not
@@ -239,7 +250,7 @@ func _choose_shots() -> void:
 	_add("00_overview",
 		Vector2(vista.x - 700.0, vista.z - 700.0), 520.0,
 		Vector3(vista.x, vista.y * 0.4, vista.z),
-		"world overview toward the high ground")
+		"spawn sector overview toward its high ground")
 
 	var trunk: RiverPolyline = _biggest_river(map)
 	var mid: int = trunk.points.size() / 2
@@ -254,13 +265,19 @@ func _choose_shots() -> void:
 	# Looking along a shoreline from just inland. Climbing high enough to frame a
 	# whole basin puts the camera outside the streamed ring, where the shot is
 	# mostly the hole where the world stops.
+	#
+	# A sector need not own a lake at all now that basins belong to whichever
+	# sector contains them, so this viewpoint is skipped rather than faked.
 	var lake: LakeData = _biggest_lake(map)
-	var shore: Vector2 = _lake_shore(map, lake)
-	var inward: Vector2 = (_lake_centroid(map, lake) - shore).normalized()
-	_add("02_lake_shore",
-		shore - inward * 55.0, 26.0,
-		Vector3(shore.x + inward.x * 220.0, lake.surface_z, shore.y + inward.y * 220.0),
-		"lake at %.0f m, %d cells" % [lake.surface_z, lake.cells.size()])
+	if lake != null:
+		var shore: Vector2 = _lake_shore(map, lake)
+		var inward: Vector2 = (_lake_centroid(map, lake) - shore).normalized()
+		_add("02_lake_shore",
+			shore - inward * 55.0, 26.0,
+			Vector3(shore.x + inward.x * 220.0, lake.surface_z, shore.y + inward.y * 220.0),
+			"lake at %.0f m, %d cells" % [lake.surface_z, lake.cells.size()])
+	else:
+		print("  skipping 02_lake_shore: sector %s owns no lake" % map.sector)
 
 	var bridge: BridgeSite = _first_bridge(map)
 	if bridge != null:
@@ -278,15 +295,16 @@ func _choose_shots() -> void:
 			Vector3(center.x, center.y + 0.5, center.z),
 			"%s span, %.0f m" % [bridge.catalog_id, bridge.span_length()])
 
-	var peak: Vector3 = _highest_point(map)
+	var peak: Vector3 = _most_rugged_on_continent()
 	_add("04_mountains",
-		Vector2(peak.x - 400.0, peak.z - 400.0), 60.0, peak,
-		"highest ground at %.0f m" % peak.y)
+		Vector2(peak.x - 700.0, peak.z - 700.0), 180.0, peak,
+		"most rugged ground on the continent, %.0f m" % peak.y)
 
-	var mouth: Vector3 = _dungeon_mouth(map)
+	# Close enough to the same peak to read the rock, far enough not to be
+	# inside it. This is where overhangs and cliff detail get judged.
 	_add("05_relief_detail",
-		Vector2(mouth.x + 90.0, mouth.z + 90.0), 20.0, mouth,
-		"steep ground reserved for a cave mouth")
+		Vector2(peak.x - 150.0, peak.z - 150.0), 40.0, peak,
+		"relief detail on the high ground")
 
 	# Framed along the roadway rather than across it, so the shot answers whether
 	# the ribbon reads as a road at all.
@@ -322,7 +340,7 @@ func _apply_shot_filter() -> void:
 		shots = kept
 
 
-func _biggest_river(map: WorldMap) -> RiverPolyline:
+func _biggest_river(map: WorldSector) -> RiverPolyline:
 	var best: RiverPolyline = map.hydro.rivers[0]
 	for reach in map.hydro.rivers:
 		if reach.order > best.order or (
@@ -332,7 +350,9 @@ func _biggest_river(map: WorldMap) -> RiverPolyline:
 	return best
 
 
-func _biggest_lake(map: WorldMap) -> LakeData:
+func _biggest_lake(map: WorldSector) -> LakeData:
+	if map.hydro.lakes.is_empty():
+		return null
 	var best: LakeData = map.hydro.lakes[0]
 	for lake in map.hydro.lakes:
 		if lake.cells.size() > best.cells.size():
@@ -343,7 +363,7 @@ func _biggest_lake(map: WorldMap) -> LakeData:
 ## The widest span carried by the highest road tier. A timber footbridge over a
 ## brook is a legitimate crossing and a useless photograph: nothing in frame
 ## says "road" except two metres of dirt hidden in the grass.
-func _first_bridge(map: WorldMap) -> BridgeSite:
+func _first_bridge(map: WorldSector) -> BridgeSite:
 	var best: BridgeSite = null
 	var best_score: float = -INF
 	for site in map.paths.bridges:
@@ -368,7 +388,7 @@ func _first_bridge(map: WorldMap) -> BridgeSite:
 ## A point on the crossing's own road, roughly [param back] metres before the
 ## deck. Walking the polyline rather than projecting a straight line matters on
 ## an approach that curves, which most of them do.
-func _road_approach(map: WorldMap, bridge: BridgeSite, back: float) -> Vector3:
+func _road_approach(map: WorldSector, bridge: BridgeSite, back: float) -> Vector3:
 	var road: RoadEdge = map.paths.roads[bridge.road_id]
 	var deck: Vector3 = bridge.center()
 	var nearest: int = 0
@@ -397,35 +417,86 @@ func _road_approach(map: WorldMap, bridge: BridgeSite, back: float) -> Vector3:
 	return road.points[at]
 
 
-func _highest_point(map: WorldMap) -> Vector3:
-	var best: int = 0
-	for i in map.terrain.elevation.size():
-		if map.terrain.elevation[i] > map.terrain.elevation[best]:
-			best = i
-	var cell: Vector2i = Vector2i(best % map.terrain.cells, best / map.terrain.cells)
-	var pos: Vector2 = WorldCoords.macro_cell_center(map.config, cell)
-	return Vector3(pos.x, map.terrain.elevation[best], pos.y)
+## The most rugged ground on the continent, found in the atlas and then refined
+## on the continental surface.
+##
+## The spawn is a river mouth, so the mountains are wherever the atlas put them,
+## which is routinely a hundred kilometres inland - searching near the spawn
+## finds the tallest plain, not a mountain. Nothing out there is baked, and
+## nothing needs to be: the streamer bakes whichever sector the camera lands in.
+func _most_rugged_on_continent() -> Vector3:
+	var atlas: ContinentAtlas = main.context.atlas
+	var best_cell: Vector2i = Vector2i.ZERO
+	var best_score: int = -1
+	for az in atlas.size:
+		for ax in atlas.size:
+			if atlas.is_ocean(ax, az) or atlas.is_lake(ax, az):
+				continue
+			if not main.context.sector_in_atlas(
+				WorldCoords.sector_of(
+					(float(ax) + 0.5) * ContinentAtlas.CELL_METRES,
+					(float(az) + 0.5) * ContinentAtlas.CELL_METRES
+				)
+			):
+				continue
+			var packed: int = atlas.cell_at(ax, az)
+			var score: int = AtlasPack.relief(packed) * 4 + AtlasPack.elevation(packed)
+			if score > best_score:
+				best_score = score
+				best_cell = Vector2i(ax, az)
+
+	# One atlas cell is a kilometre; pick the roughest 128 m of it.
+	var origin: Vector2 = Vector2(best_cell) * ContinentAtlas.CELL_METRES
+	var best: Vector2 = origin
+	var best_relief: float = -INF
+	for iz in 8:
+		for ix in 8:
+			var at: Vector2 = origin + Vector2(float(ix), float(iz)) * 128.0
+			var relief: float = continental.relief_amp_at(at.x, at.y)
+			if relief > best_relief:
+				best_relief = relief
+				best = at
+	return Vector3(best.x, continental.height_at(best.x, best.y), best.y)
 
 
-func _dungeon_mouth(map: WorldMap) -> Vector3:
-	for claim in map.claims.claims:
-		if claim.kind == &"dungeon_mouth":
-			return Vector3(claim.center.x, claim.ground_z, claim.center.y)
-	return _highest_point(map)
+## Highest cell of the sector core. The halo is excluded: it belongs to the
+## neighbour, and a camera placed there films chunks nobody has baked.
+func _highest_point(map: WorldSector) -> Vector3:
+	var halo: int = map.config.halo_cells()
+	var core: int = map.config.macro_cells_per_sector()
+	var best: Vector2i = Vector2i(halo, halo)
+	var best_z: float = -INF
+	for cz in range(halo, halo + core):
+		for cx in range(halo, halo + core):
+			var value: float = map.terrain.elevation[map.terrain.index_of(cx, cz)]
+			if value > best_z:
+				best_z = value
+				best = Vector2i(cx, cz)
+	var pos: Vector2 = map.terrain.cell_center(best.x, best.y)
+	return Vector3(pos.x, best_z, pos.y)
 
 
-func _road_in_plains(map: WorldMap) -> RoadEdge:
+## The widest long road running over gentle ground. Tier alone is no longer a
+## useful filter: a sector may hold nothing but local tracks, or nothing but a
+## slice of one atlas trunk.
+func _road_in_plains(map: WorldSector) -> RoadEdge:
+	var best: RoadEdge = map.paths.roads[0]
+	var best_score: float = -INF
 	for road in map.paths.roads:
-		if road.tier != RoadEdge.Tier.PRIMARY or road.points.size() < 24:
+		if road.points.size() < 24:
 			continue
 		var mid: Vector3 = road.points[road.points.size() / 2]
-		if map.terrain.relief_amp_at(mid.x, mid.z) < 10.0:
-			return road
-	return map.paths.roads[0]
+		var score: float = (
+			road.half_width * 10.0 - map.terrain.relief_amp_at(mid.x, mid.z)
+		)
+		if score > best_score:
+			best_score = score
+			best = road
+	return best
 
 
 ## A flooded cell with a dry neighbour, i.e. a point on the actual waterline.
-func _lake_shore(map: WorldMap, lake: LakeData) -> Vector2:
+func _lake_shore(map: WorldSector, lake: LakeData) -> Vector2:
 	var cells: int = map.terrain.cells
 	var lake_id: PackedInt32Array = map.hydro.lake_id
 	for cell in lake.cells:
@@ -438,17 +509,15 @@ func _lake_shore(map: WorldMap, lake: LakeData) -> Vector2:
 			or lake_id[cell - cells] != lake.id or lake_id[cell + cells] != lake.id
 		)
 		if dry:
-			return WorldCoords.macro_cell_center(map.config, Vector2i(cx, cz))
+			return map.terrain.cell_center(cx, cz)
 	return _lake_centroid(map, lake)
 
 
 ## Lake bounds cover a great deal of dry land when a basin branches, so the
 ## camera aims at the mean of the flooded cells instead.
-func _lake_centroid(map: WorldMap, lake: LakeData) -> Vector2:
+func _lake_centroid(map: WorldSector, lake: LakeData) -> Vector2:
 	var cells: int = map.terrain.cells
 	var sum: Vector2 = Vector2.ZERO
 	for cell in lake.cells:
-		sum += WorldCoords.macro_cell_center(
-			map.config, Vector2i(cell % cells, cell / cells)
-		)
+		sum += map.terrain.cell_center(cell % cells, cell / cells)
 	return sum / float(lake.cells.size())

@@ -1,8 +1,15 @@
 class_name MainWorld
 extends Node3D
-## Boots the world: bake the lower layers, then stream chunks around the player.
+## Boots the world: generate the continent atlas, build the shared continental
+## context, bake the sector the player will open in, then stream chunks.
 ##
-## The bake runs on a worker so the window stays responsive, and the player is
+## The first acceptance scene is a river mouth. It is chosen from the atlas
+## alone - biggest river class, comfortably inside the continent - so the same
+## seed always opens on the same estuary, and the slice exercises the two
+## hardest seams at once: a trunk river crossing sector boundaries, and an
+## ocean shoreline shared by four sectors.
+##
+## Generation runs on a worker so the window stays responsive, and the player is
 ## held frozen until there is real collision under the spawn point.
 
 const CATALOG_PATH: String = "res://assets/catalog/props.json"
@@ -16,13 +23,16 @@ const WATER_SHADER: String = "res://shaders/water.gdshader"
 @onready var loading_label: Label = $UI/Loading
 
 var config: WorldConfig
-var map: WorldMap
+var context: WorldContext
+var sectors: SectorManager
+var spawn_sector: WorldSector
 
 var _bake_task: int = -1
 var _spawn_world: Vector3 = Vector3.ZERO
 var _spawn_pending: bool = false
 var _terrain_material: ShaderMaterial
 var _water_material: ShaderMaterial
+var _boot_error: String = ""
 
 
 func _ready() -> void:
@@ -35,12 +45,39 @@ func _ready() -> void:
 	_water_material = ShaderMaterial.new()
 	_water_material.shader = load(WATER_SHADER)
 
-	loading_label.text = "Shaping %0.1f km of land..." % (config.world_size() / 1000.0)
+	loading_label.text = "Charting %d km of continent..." % config.atlas_size
 	_bake_task = WorkerThreadPool.add_task(_bake)
 
 
 func _bake() -> void:
-	map = WorldMap.generate(config)
+	var atlas: ContinentAtlas = ContinentAtlas.generate(config.seed, config.atlas_size)
+	var errors: PackedStringArray = atlas.validate()
+	if not errors.is_empty():
+		# The atlas is the authority for everything below it. A broken one must
+		# stop the boot, not quietly produce a world with impossible rivers.
+		_boot_error = "Atlas failed validation: %s" % [errors]
+		return
+	context = WorldContext.create(config, atlas)
+
+	var mouths: Array[Dictionary] = WorldQuery.ranked_river_mouths(context)
+	if mouths.is_empty():
+		_boot_error = "Atlas produced no river mouths to open on"
+		return
+
+	var continental: ContinentalTerrain = context.sampler()
+	for mouth in mouths:
+		var position: Vector2 = mouth["position"]
+		var sector_coord: Vector2i = WorldCoords.sector_of(position.x, position.y)
+		var candidate: WorldSector = WorldSector.generate(context, sector_coord)
+		var landing: Vector3 = WorldQuery.spawn_beside_mouth(
+			candidate, continental, position
+		)
+		if landing == Vector3.INF:
+			continue
+		spawn_sector = candidate
+		_spawn_world = landing
+		return
+	_boot_error = "No river mouth had dry ground beside it"
 
 
 func _process(_delta: float) -> void:
@@ -49,36 +86,47 @@ func _process(_delta: float) -> void:
 			return
 		WorkerThreadPool.wait_for_task_completion(_bake_task)
 		_bake_task = -1
-		_on_world_baked()
+		if not _boot_error.is_empty():
+			loading_label.text = _boot_error
+			push_error(_boot_error)
+			return
+		_on_world_ready()
 		return
 	if _spawn_pending:
 		_try_spawn()
 
 
-func _on_world_baked() -> void:
-	print("Orrun world baked: %s" % [map.bake_timings])
-	print("  %d river reaches, %d lakes, %d roads, %d crossings" % [
-		map.hydro.rivers.size(), map.hydro.lakes.size(),
-		map.paths.roads.size(), map.paths.bridges.size()
+func _on_world_ready() -> void:
+	print("Orrun continent: %s" % [context.build_timings])
+	print("  atlas %d km, %d river mouths, %d trunk river segments, %d road segments" % [
+		config.atlas_size, context.corridors.mouths.size(),
+		context.corridors.river_segment_count(), context.corridors.road_segment_count()
+	])
+	print("  spawn sector %s: %s" % [spawn_sector.sector, spawn_sector.bake_timings])
+	print("  %d river reaches, %d local lakes, %d roads, %d crossings" % [
+		spawn_sector.hydro.rivers.size(), spawn_sector.hydro.lakes.size(),
+		spawn_sector.paths.roads.size(), spawn_sector.paths.bridges.size()
 	])
 
 	var specs: Array[PropPlacer.PropSpec] = PropPlacer.load_specs(CATALOG_PATH)
 	PropLibrary.load_catalog(specs, CATALOG_PATH)
 
-	var candidates: PackedVector3Array = WorldQuery.spawn_candidates(map)
-	assert(candidates.size() > 0, "World produced no spawn candidates")
-	_spawn_world = candidates[0]
+	sectors = SectorManager.new(context)
+	sectors.adopt(spawn_sector)
+	sectors.request_around(spawn_sector.sector)
 
 	# Start the origin under the spawn so scene coordinates begin near zero even
-	# though the spawn itself can be kilometres into the map.
+	# though the spawn itself is hundreds of kilometres into the continent.
 	WorldOrigin.rebase_to(Vector3(_spawn_world.x, 0.0, _spawn_world.z))
 	player.global_position = WorldOrigin.to_scene(
 		_spawn_world + Vector3(0.0, 60.0, 0.0)
 	)
 
-	streamer.setup(config, map, player, specs, _terrain_material, _water_material)
-	hydro_map.build(map, player)
-	debug_hud.bind(streamer, map, player)
+	streamer.setup(
+		context, sectors, player, specs, _terrain_material, _water_material
+	)
+	hydro_map.build(sectors, player)
+	debug_hud.bind(streamer, sectors, player)
 	debug_hud.visible = true
 
 	_spawn_pending = true
@@ -122,3 +170,5 @@ func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_PREDELETE:
 		if streamer != null:
 			streamer.shutdown()
+		if sectors != null:
+			sectors.shutdown()

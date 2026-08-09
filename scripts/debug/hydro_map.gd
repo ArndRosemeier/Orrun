@@ -1,44 +1,64 @@
 extends Control
-## Top-down view of the baked world: relief, drainage, lakes, roads, claims.
+## Top-down view of the sector under the player: relief, drainage, lakes, roads.
 ##
 ## This is the first thing to look at when the landscape feels wrong. If the
 ## drainage does not read as believable here, no amount of 3D detail will save
 ## it, so this view exists before any of the prettier ones.
+##
+## It draws the whole baked window, halo included, with the published 8 km core
+## outlined. Seams are easiest to spot exactly there: a trunk river or road that
+## bends as it crosses the outline is a contract failure, not a rendering one.
 
-const MAP_PIXELS: int = 512
-
-var map: WorldMap
+var sectors: SectorManager
 var player: Node3D
 
 var _texture: ImageTexture
-var _scale: float = 1.0
+var _drawn_sector: Vector2i = Vector2i(2147483647, 2147483647)
+var _sector: WorldSector
 var _origin: Vector2 = Vector2.ZERO
+var _side: float = 1.0
 
 
-func build(world_map: WorldMap, player_node: Node3D) -> void:
-	map = world_map
+func build(sector_manager: SectorManager, player_node: Node3D) -> void:
+	sectors = sector_manager
 	player = player_node
-	_texture = ImageTexture.create_from_image(_render_map())
 	visible = false
 
 
-func _render_map() -> Image:
-	var cells: int = map.terrain.cells
+func _refresh() -> void:
+	var world_pos: Vector3 = WorldOrigin.to_world(player.global_position)
+	var coord: Vector2i = WorldCoords.sector_of(world_pos.x, world_pos.z)
+	if coord == _drawn_sector and _texture != null:
+		return
+	var sector: WorldSector = sectors.get_sector(coord)
+	if sector == null:
+		return
+	_sector = sector
+	_drawn_sector = coord
+	_texture = ImageTexture.create_from_image(_render_sector(sector))
+
+
+func _render_sector(sector: WorldSector) -> Image:
+	var cells: int = sector.terrain.cells
 	var image: Image = Image.create_empty(cells, cells, false, Image.FORMAT_RGB8)
 
-	var low: float = map.terrain.min_elevation
-	var high: float = map.terrain.max_elevation
+	var low: float = sector.terrain.min_elevation
+	var high: float = sector.terrain.max_elevation
 	var span: float = maxf(high - low, 1.0)
 
 	for cz in cells:
 		for cx in cells:
 			var index: int = cz * cells + cx
-			var height: float = map.terrain.elevation[index]
+			var height: float = sector.terrain.elevation[index]
 			var t: float = (height - low) / span
 
 			# Cheap hillshade so ridges and valleys are legible.
-			var left: float = map.terrain.elevation[map.terrain.clamped_index(cx - 1, cz)]
-			var up: float = map.terrain.elevation[map.terrain.clamped_index(cx, cz - 1)]
+			var left: float = sector.terrain.elevation[
+				sector.terrain.clamped_index(cx - 1, cz)
+			]
+			var up: float = sector.terrain.elevation[
+				sector.terrain.clamped_index(cx, cz - 1)
+			]
 			var shade: float = clampf(
 				0.5 + (height - (left + up) * 0.5) * 0.06, 0.15, 1.0
 			)
@@ -48,9 +68,12 @@ func _render_map() -> Image:
 				color = color.lerp(Color(0.93, 0.94, 0.96), smoothstep(0.72, 0.95, t))
 			color *= shade
 
-			var lake: int = map.hydro.lake_id[index]
+			if sector.hydro.atlas_water[index] != 0:
+				# Sea and atlas lakes: continental authority, not solved here.
+				color = Color(0.08, 0.20, 0.38)
+			var lake: int = sector.hydro.lake_id[index]
 			if lake >= 0:
-				var depth: float = map.hydro.lakes[lake].surface_z - height
+				var depth: float = sector.hydro.lakes[lake].surface_z - height
 				color = Color(0.16, 0.34, 0.52).lerp(
 					Color(0.04, 0.12, 0.28), clampf(depth / 18.0, 0.0, 1.0)
 				)
@@ -63,17 +86,19 @@ func _render_map() -> Image:
 
 
 func _draw_rivers(image: Image) -> void:
-	for reach in map.hydro.rivers:
+	for reach in _sector.hydro.rivers:
 		var tone: Color = Color(0.30, 0.62, 0.86).lerp(
 			Color(0.10, 0.36, 0.72), clampf(float(reach.order - 1) / 4.0, 0.0, 1.0)
 		)
+		if reach.is_trunk:
+			tone = Color(0.20, 0.85, 0.95)
 		var thickness: int = clampi(reach.order, 1, 3)
 		for i in range(reach.points.size() - 1):
 			_line(image, reach.points[i], reach.points[i + 1], tone, thickness)
 
 
 func _draw_roads(image: Image) -> void:
-	for road in map.paths.roads:
+	for road in _sector.paths.roads:
 		var tone: Color = Color(0.86, 0.76, 0.50)
 		var thickness: int = 1
 		match road.tier:
@@ -85,14 +110,14 @@ func _draw_roads(image: Image) -> void:
 		for i in range(road.points.size() - 1):
 			_line(image, road.points[i], road.points[i + 1], tone, thickness)
 
-	for site in map.paths.bridges:
+	for site in _sector.paths.bridges:
 		var center: Vector3 = site.center()
 		_dot(image, Vector2(center.x, center.z),
 			Color(0.95, 0.45, 0.25) if not site.is_ford else Color(0.55, 0.85, 0.95), 2)
 
 
 func _draw_claims(image: Image) -> void:
-	for claim in map.claims.claims:
+	for claim in _sector.claims.claims:
 		match claim.kind:
 			&"settlement":
 				_dot(image, claim.center, Color(1.0, 0.95, 0.35), 3)
@@ -101,8 +126,8 @@ func _draw_claims(image: Image) -> void:
 
 
 func _to_pixel(world_x: float, world_z: float) -> Vector2i:
-	var cs: float = map.config.macro_cell_size
-	return Vector2i(int(world_x / cs), int(world_z / cs))
+	var cell: Vector2i = _sector.terrain.local_cell_of(world_x, world_z)
+	return cell
 
 
 func _line(image: Image, a: Vector3, b: Vector3, color: Color, thickness: int) -> void:
@@ -122,12 +147,12 @@ func _dot(image: Image, position: Vector2, color: Color, radius: int) -> void:
 
 
 func _dot_pixel(image: Image, p: Vector2i, color: Color, radius: int) -> void:
-	var size: int = image.get_width()
+	var size_px: int = image.get_width()
 	for dz in range(-radius + 1, radius):
 		for dx in range(-radius + 1, radius):
 			var x: int = p.x + dx
 			var z: int = p.y + dz
-			if x < 0 or z < 0 or x >= size or z >= size:
+			if x < 0 or z < 0 or x >= size_px or z >= size_px:
 				continue
 			image.set_pixel(x, z, color)
 
@@ -135,29 +160,45 @@ func _dot_pixel(image: Image, p: Vector2i, color: Color, radius: int) -> void:
 func _draw() -> void:
 	if _texture == null:
 		return
-	var side: float = minf(size.x, size.y) - 40.0
-	_origin = Vector2((size.x - side) * 0.5, (size.y - side) * 0.5)
-	_scale = side / float(map.terrain.cells)
+	_side = minf(size.x, size.y) - 40.0
+	_origin = Vector2((size.x - _side) * 0.5, (size.y - _side) * 0.5)
+	var pixels: float = float(_sector.terrain.cells)
 
-	draw_rect(Rect2(_origin - Vector2.ONE * 6.0, Vector2.ONE * (side + 12.0)),
+	draw_rect(Rect2(_origin - Vector2.ONE * 6.0, Vector2.ONE * (_side + 12.0)),
 		Color(0.05, 0.05, 0.07, 0.88))
-	draw_texture_rect(_texture, Rect2(_origin, Vector2.ONE * side), false)
+	draw_texture_rect(_texture, Rect2(_origin, Vector2.ONE * _side), false)
+
+	# The published core: everything outside it is halo the player never sees.
+	var core_scale: float = _side / pixels
+	draw_rect(
+		Rect2(
+			_origin + Vector2(_sector.core_min) * core_scale,
+			Vector2(_sector.core_max - _sector.core_min + Vector2i.ONE) * core_scale
+		),
+		Color(1.0, 1.0, 1.0, 0.35), false, 1.0
+	)
 
 	if player != null:
 		var world_pos: Vector3 = WorldOrigin.to_world(player.global_position)
-		var cell: Vector2 = Vector2(world_pos.x, world_pos.z) / map.config.macro_cell_size
-		var marker: Vector2 = _origin + cell * _scale
+		var cell: Vector2 = Vector2(
+			_sector.terrain.local_cell_of(world_pos.x, world_pos.z)
+		)
+		var marker: Vector2 = _origin + cell * core_scale
 		draw_circle(marker, 5.0, Color(1.0, 0.25, 0.2))
 		draw_circle(marker, 2.0, Color.WHITE)
 
 	draw_string(
 		ThemeDB.fallback_font,
 		_origin + Vector2(0.0, -12.0),
-		"World map  -  blue: rivers by Strahler order  -  yellow: settlements  -  orange: bridges",
+		"Sector %d,%d  -  cyan: atlas trunks  -  blue: local water  -  box: published core" % [
+			_drawn_sector.x, _drawn_sector.y
+		],
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.85, 0.85, 0.9)
 	)
 
 
 func _process(_delta: float) -> void:
-	if visible:
-		queue_redraw()
+	if not visible or sectors == null or player == null:
+		return
+	_refresh()
+	queue_redraw()

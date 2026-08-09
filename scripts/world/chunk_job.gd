@@ -2,11 +2,16 @@ class_name ChunkJob
 extends GenQueue.Job
 ## Everything one chunk needs, computed off the main thread.
 ##
-## Inputs are the baked world plus its region; outputs are plain arrays. The job
+## Inputs are the owning sector plus its page; outputs are plain arrays. The job
 ## never creates a Node, Mesh or Shape - see [ChunkNode] for that half.
+##
+## The continental sampler and the noise set are built here rather than passed
+## in: both own FastNoiseLite state, which is not safe to read from two threads
+## at once, and building them is cheap next to meshing a chunk.
 
 var config: WorldConfig
-var map: WorldMap
+var context: WorldContext
+var sector: WorldSector
 var region: RegionData
 var prop_specs: Array[PropPlacer.PropSpec] = []
 
@@ -26,9 +31,12 @@ var build_ms: int = 0
 func run() -> void:
 	var started: int = Time.get_ticks_msec()
 	var noise: NoiseSet = NoiseSet.create(config)
+	var continental: ContinentalTerrain = context.sampler()
 	var chunk_origin: Vector2 = WorldCoords.chunk_origin(config, chunk)
 
-	var field: DensityField.Field = DensityField.build(config, map, noise, chunk, lod)
+	var field: DensityField.Field = DensityField.build(
+		config, sector, continental, noise, chunk, lod
+	)
 	max_contract_error = field.max_contract_error
 
 	mesh_data = MeshExtract.build(
@@ -38,13 +46,13 @@ func run() -> void:
 
 	if want_props and config.props_enabled:
 		props = PropPlacer.place(
-			config, prop_specs, field, region, map.claims, chunk_origin
+			config, prop_specs, field, region, sector.claims, chunk_origin
 		)
 
 	var bounds: Rect2 = Rect2(chunk_origin, Vector2.ONE * config.chunk_size)
 	for site in region.bridges:
-		var center: Vector3 = site.center()
-		if bounds.has_point(Vector2(center.x, center.z)):
+		var centre: Vector3 = site.center()
+		if bounds.has_point(Vector2(centre.x, centre.z)):
 			bridges.append(site)
 
 	build_ms = Time.get_ticks_msec() - started

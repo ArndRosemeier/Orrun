@@ -19,6 +19,11 @@ var from_node: int = -1
 var to_node: int = -1
 var crossings: Array[BridgeSite] = []
 var bounds: Rect2 = Rect2()
+## True when this road is an atlas trunk, rebuilt from continental geometry
+## rather than routed locally, and therefore identical in every sector.
+var is_trunk: bool = false
+## Atlas feature this road belongs to, 0 for a locally routed track.
+var feature_id: int = 0
 
 
 func compute_bounds() -> void:

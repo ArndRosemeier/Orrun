@@ -1,84 +1,187 @@
 class_name Hydrology
 extends RefCounted
-## Layer 2: where water actually is.
+## Layer 2: where water actually is, solved for one sector.
 ##
-## Solved with a bucket-queue priority flood over the macro grid. That single
-## pass gives us, in one consistent structure:
-##   - a depression-filled drainage surface that never rises downstream,
-##   - flow directions (each cell's receiver is whoever discovered it),
-##   - a processing order (downstream cells always pop before upstream ones),
-##   - lakes for free: any cell whose filled height exceeds its terrain is
-##     underwater, and the fill height IS that basin's spill elevation.
+## The sector only solves what it is allowed to own. Anything that crosses its
+## boundary belongs to the atlas and is reconstructed from it, identically, by
+## every sector that touches it:
 ##
-## Consequences that the design depends on:
-##   - river water_z is monotonically non-increasing downstream by construction,
-##   - every lake sits at its own local spill height, never a global water level,
-##   - a lake's outflow starts at the spill and descends from there.
+##   trunk rivers   pure [AtlasCorridors] polylines, atlas water heights,
+##                  atlas feature class - never sector-local accumulation,
+##                  because 8 km of catchment cannot tell you how big a river is
+##   ocean, atlas   the global signed shoreline in [ContinentalTerrain]
+##   lakes
+##   local brooks   solved here, and required to stay inside the sector core
+##   local lakes    solved here, and rejected unless the whole basin is visible
+##                  to both neighbours, so both accept or both reject it
+##
+## The interior solver is still a bucket-queue priority flood, which gives in
+## one pass: a depression-filled drainage surface that never rises downstream,
+## flow directions, a downstream-first processing order, and lakes for free.
+##
+## What changed from the finite-world version: the whole-rim sink is gone,
+## replaced by typed boundary conditions (atlas water, trunk corridors, and the
+## edge contract's ports), and the terrain is never rewritten. Breaching used to
+## carve outlets into the macro grid; the atlas trunk valleys in
+## [ContinentalTerrain] do that job now, as a pure function, so no sector can
+## disagree with its neighbour about where the ground is.
 
 static var NEIGHBOR_DX: PackedInt32Array = PackedInt32Array([1, 1, 0, -1, -1, -1, 0, 1])
 static var NEIGHBOR_DZ: PackedInt32Array = PackedInt32Array([0, 1, 1, 1, 0, -1, -1, -1])
 const LEVEL_STEP: float = 0.25
-## How many breach-and-reflood rounds to run before accepting what is left.
-const BREACH_ROUNDS: int = 2
-## Metres each successive shoulder of a breached channel stands above the bed.
-const BREACH_SHOULDER: float = 9.0
-## Widest a breach may open, in cells either side of the channel.
-const BREACH_MAX_RINGS: int = 5
 const LAKE_EPSILON: float = 0.05
+const MAX_LAKE_DISTANCE: float = 512.0
+## Metres a local lake may span before it stops being a lake and becomes a
+## basin the drainage never left. Well under the sector halo, so both
+## neighbours see the whole basin and reach the same verdict about it.
+const LOCAL_LAKE_MAX_SPAN: float = 1200.0
+## Metres either side of a trunk centreline that count as the trunk corridor.
+const TRUNK_MARGIN: float = 6.0
+## Local reaches are capped below the trunk order so a brook can never claim to
+## be wider than the river it joins.
+const LOCAL_MAX_ORDER: int = 3
+## Stations along a port stub, on each side of the boundary.
+const STUB_STATIONS: int = 6
 
 var config: WorldConfig
 var terrain: MacroTerrain
+var continental: ContinentalTerrain
+var corridors: AtlasCorridors
+
+## Local cell bounds of the sector core, inclusive. Everything outside is halo:
+## read to get the interior right, never published.
+var core_min: Vector2i = Vector2i.ZERO
+var core_max: Vector2i = Vector2i.ZERO
+## The core minus the keep-out band. Locally solved water lives here and nowhere
+## else, so it can never shape ground a neighbouring sector also meshes.
+var local_min: Vector2i = Vector2i.ZERO
+var local_max: Vector2i = Vector2i.ZERO
 
 ## Depression-filled drainage surface (m). filled >= elevation everywhere.
 var filled: PackedFloat32Array
-## Downstream neighbour index, -1 for cells that drain off the map.
+## Downstream neighbour index, -1 for cells that drain into a boundary sink.
 var receiver: PackedInt32Array
 ## Pop order of the priority flood: downstream before upstream.
 var flow_order: PackedInt32Array
 ## Upslope contributing area, in weighted cells.
 var accumulation: PackedFloat32Array
-## Lake id per cell, -1 when dry.
+## Local lake id per cell, -1 when dry or when the water is the atlas's.
 var lake_id: PackedInt32Array
-## True where flow is concentrated enough to be a visible channel.
+## True where local flow is concentrated enough to be a visible channel.
 var is_channel: PackedInt32Array
-## Distance in metres to the nearest lake cell, capped.
+## 1 inside an atlas trunk corridor.
+var trunk: PackedByteArray
+## 1 where the atlas says the ground is under ocean or an atlas lake.
+var atlas_water: PackedByteArray
+## Distance in metres to the nearest local lake cell, capped.
 var lake_distance: PackedFloat32Array
 ## Surface height of whichever lake that nearest cell belongs to, -INF when no
-## lake is in range. Carried alongside the distance transform so a shoreline
-## column knows which basin it is on the edge of, rather than guessing from
-## bounding boxes and picking up a different lake across the valley.
+## lake is in range.
 var lake_surface_near: PackedFloat32Array
-## Uncapped distance used only to carry the surface outward. Build scratch.
 var _surface_reach: PackedFloat32Array
 
 var lakes: Array[LakeData] = []
 var rivers: Array[RiverPolyline] = []
 var river_index: SpatialIndex2D
 
-const MAX_LAKE_DISTANCE: float = 512.0
+## Ports the sector must accept flow from, and drain flow into.
+var inflow_ports: Array[SectorEdgeContract.Port] = []
+var outflow_ports: Array[SectorEdgeContract.Port] = []
 
 
-static func solve(cfg: WorldConfig, macro: MacroTerrain, noise: NoiseSet) -> Hydrology:
+static func solve(
+	cfg: WorldConfig,
+	macro: MacroTerrain,
+	cont: ContinentalTerrain,
+	corr: AtlasCorridors,
+	core_from: Vector2i,
+	core_to: Vector2i,
+	inflow: Array[SectorEdgeContract.Port],
+	outflow: Array[SectorEdgeContract.Port],
+	noise: NoiseSet
+) -> Hydrology:
 	var hydro: Hydrology = Hydrology.new()
 	hydro.config = cfg
 	hydro.terrain = macro
+	hydro.continental = cont
+	hydro.corridors = corr
+	hydro.core_min = core_from
+	hydro.core_max = core_to
+	hydro.inflow_ports = inflow
+	hydro.outflow_ports = outflow
+	hydro.river_index = SpatialIndex2D.new(160.0)
+
+	var keepout: int = cfg.keepout_cells()
+	hydro.local_min = core_from + Vector2i(keepout, keepout)
+	hydro.local_max = core_to - Vector2i(keepout, keepout)
+
+	hydro._classify_cells()
 	hydro._priority_flood()
-	# Draining one basin exposes the sub-basins inside it, so this converges
-	# rather than finishing in one pass. Each round re-floods, because the land
-	# itself changed and every height, receiver and pop order is now stale.
-	for _round in BREACH_ROUNDS:
-		if not hydro._breach_depressions():
-			break
-		hydro._priority_flood()
 	hydro._accumulate()
 	hydro._find_lakes()
 	hydro._mark_channels()
-	hydro._build_rivers(noise)
+	hydro._build_trunk_rivers()
+	hydro._build_port_stubs()
+	hydro._build_local_rivers(noise)
+	hydro._index_rivers()
 	hydro._build_lake_distance()
 	return hydro
 
 
-# --- Priority flood -----------------------------------------------------------
+# --- Boundary conditions --------------------------------------------------------
+
+## Marks the cells the sector does not get to decide about: atlas water, and
+## the trunk corridors that carry flow across the boundary.
+func _classify_cells() -> void:
+	var n: int = terrain.cells
+	var count: int = n * n
+	trunk = PackedByteArray()
+	trunk.resize(count)
+	atlas_water = PackedByteArray()
+	atlas_water.resize(count)
+
+	for cz in n:
+		for cx in n:
+			var centre: Vector2 = terrain.cell_center(cx, cz)
+			if continental.shore_signed(centre.x, centre.y) <= 0.0:
+				atlas_water[cz * n + cx] = 1
+
+	var rect: Rect2 = terrain.window_rect().grow(corridors.max_valley_radius)
+	for base in corridors.rivers_in_rect(rect):
+		var ax: float = corridors.rivers[base]
+		var az: float = corridors.rivers[base + 2]
+		var bx: float = corridors.rivers[base + 3]
+		var bz: float = corridors.rivers[base + 5]
+		var half: float = corridors.rivers[base + 6] + TRUNK_MARGIN
+		_stamp_trunk(ax, az, bx, bz, half)
+
+
+func _stamp_trunk(ax: float, az: float, bx: float, bz: float, half: float) -> void:
+	var cs: float = terrain.cell_size
+	var min_x: float = minf(ax, bx) - half
+	var max_x: float = maxf(ax, bx) + half
+	var min_z: float = minf(az, bz) - half
+	var max_z: float = maxf(az, bz) + half
+	var c0: Vector2i = terrain.local_cell_of(min_x, min_z)
+	var c1: Vector2i = terrain.local_cell_of(max_x, max_z)
+	var n: int = terrain.cells
+	for cz in range(maxi(c0.y, 0), mini(c1.y + 1, n)):
+		for cx in range(maxi(c0.x, 0), mini(c1.x + 1, n)):
+			var centre: Vector2 = terrain.cell_center(cx, cz)
+			var t: float = ContinentalTerrain._segment_param(
+				centre.x, centre.y, ax, az, bx, bz
+			)
+			var px: float = ax + (bx - ax) * t
+			var pz: float = az + (bz - az) * t
+			if Vector2(centre.x - px, centre.y - pz).length() <= half + cs * 0.5:
+				trunk[cz * n + cx] = 1
+
+
+func _is_sink(index: int) -> bool:
+	return atlas_water[index] != 0 or trunk[index] != 0
+
+
+# --- Priority flood ---------------------------------------------------------------
 
 func _priority_flood() -> void:
 	var n: int = terrain.cells
@@ -104,13 +207,19 @@ func _priority_flood() -> void:
 	var head: PackedInt32Array = PackedInt32Array()
 	head.resize(levels)
 
-	# Seed the whole map rim: water leaves the world at its edges.
-	for cx in n:
-		_seed(buckets, visited, elevation, cx, 0, n, base, levels)
-		_seed(buckets, visited, elevation, cx, n - 1, n, base, levels)
-	for cz in range(1, n - 1):
-		_seed(buckets, visited, elevation, 0, cz, n, base, levels)
-		_seed(buckets, visited, elevation, n - 1, cz, n, base, levels)
+	# Typed sinks, in place of the old whole-rim drain. Water leaves the sector
+	# into the sea, into an atlas lake, into an atlas trunk, or across the
+	# window edge - and never simply because the array ran out.
+	for cz in n:
+		for cx in n:
+			var index: int = cz * n + cx
+			var edge: bool = cx == 0 or cz == 0 or cx == n - 1 or cz == n - 1
+			if edge or _is_sink(index):
+				_seed(buckets, visited, elevation, index, base, levels)
+	for port in outflow_ports:
+		var cell: Vector2i = terrain.local_cell_of(port.position.x, port.position.y)
+		if terrain.contains_local(cell.x, cell.y):
+			_seed(buckets, visited, elevation, cell.y * n + cell.x, base, levels)
 
 	var level: int = 0
 	var popped: int = 0
@@ -118,14 +227,14 @@ func _priority_flood() -> void:
 		if head[level] >= buckets[level].size():
 			level += 1
 			continue
-		var cell: int = buckets[level][head[level]]
+		var cell_index: int = buckets[level][head[level]]
 		head[level] += 1
-		flow_order[popped] = cell
+		flow_order[popped] = cell_index
 		popped += 1
 
-		var cx: int = cell % n
-		var cz: int = cell / n
-		var cell_filled: float = filled[cell]
+		var cx: int = cell_index % n
+		var cz: int = cell_index / n
+		var cell_filled: float = filled[cell_index]
 		for k in 8:
 			var nx: int = cx + NEIGHBOR_DX[k]
 			var nz: int = cz + NEIGHBOR_DZ[k]
@@ -137,7 +246,7 @@ func _priority_flood() -> void:
 			visited[nb] = 1
 			var nb_filled: float = maxf(elevation[nb], cell_filled)
 			filled[nb] = nb_filled
-			receiver[nb] = cell
+			receiver[nb] = cell_index
 			var nb_level: int = maxi(level, int((nb_filled - base) / LEVEL_STEP))
 			buckets[clampi(nb_level, 0, levels - 1)].append(nb)
 
@@ -148,13 +257,10 @@ func _seed(
 	buckets: Array[PackedInt32Array],
 	visited: PackedByteArray,
 	elevation: PackedFloat32Array,
-	cx: int,
-	cz: int,
-	n: int,
+	index: int,
 	base: float,
 	levels: int
 ) -> void:
-	var index: int = cz * n + cx
 	if visited[index] != 0:
 		return
 	visited[index] = 1
@@ -164,193 +270,35 @@ func _seed(
 	buckets[level].append(index)
 
 
-# --- Breaching -----------------------------------------------------------------
-
-## Cuts outlets for depressions the land could plausibly have drained itself,
-## and returns whether anything was carved.
-##
-## A priority flood alone answers "how high does this hollow fill before it
-## spills", which on a broad, nearly level lowland is "until it is a sea". Real
-## drainage does the opposite first: the outflow erodes its own notch through the
-## rim, and the hollow only stays wet if the rim is too high to cut. So every
-## depression gets one attempt at an outlet, capped at [member WorldConfig.breach_limit]
-## metres of cut, and lakes are what is left over — deep bowls, not flooded
-## plains.
-##
-## The channel is written into the macro elevation, so it is real terrain: rivers
-## run down it, roads must cross it, and the density field carves a valley around
-## it like any other reach.
-func _breach_depressions() -> bool:
-	var n: int = terrain.cells
-	var count: int = n * n
-	var elevation: PackedFloat32Array = terrain.elevation
-	var cell_size: float = terrain.cell_size
-	var diagonal: float = cell_size * sqrt(2.0)
-
-	# Depression cells grouped into basins, each visited from its lowest point.
-	# Order is grid order, so the same seed always breaches in the same sequence.
-	var seen: PackedByteArray = PackedByteArray()
-	seen.resize(count)
-	var stack: PackedInt32Array = PackedInt32Array()
-	var basin: PackedInt32Array = PackedInt32Array()
-	var carved: bool = false
-
-	for start in count:
-		if seen[start] != 0 or filled[start] - elevation[start] <= LAKE_EPSILON:
-			continue
-
-		basin.clear()
-		stack.clear()
-		stack.append(start)
-		seen[start] = 1
-		var pit: int = start
-		while not stack.is_empty():
-			var cell: int = stack[stack.size() - 1]
-			stack.remove_at(stack.size() - 1)
-			basin.append(cell)
-			if elevation[cell] < elevation[pit]:
-				pit = cell
-
-			var cx: int = cell % n
-			var cz: int = cell / n
-			for k in 8:
-				var nx: int = cx + NEIGHBOR_DX[k]
-				var nz: int = cz + NEIGHBOR_DZ[k]
-				if nx < 0 or nz < 0 or nx >= n or nz >= n:
-					continue
-				var nb: int = nz * n + nx
-				if seen[nb] != 0 or filled[nb] - elevation[nb] <= LAKE_EPSILON:
-					continue
-				seen[nb] = 1
-				stack.append(nb)
-
-		var limit: float = config.breach_limit
-		if basin.size() > config.breach_area_cells:
-			limit = INF
-		if _breach_from(pit, limit, elevation, n, cell_size, diagonal):
-			carved = true
-
-	if not carved:
-		return false
-
-	var lowest: float = INF
-	var highest: float = -INF
-	for i in count:
-		lowest = minf(lowest, elevation[i])
-		highest = maxf(highest, elevation[i])
-	terrain.min_elevation = lowest
-	terrain.max_elevation = highest
-	return true
-
-
-## Walks the flow path out of one depression twice: once to price the cut, once
-## to make it. Pricing first matters — a half-dug channel that stops at the
-## divide drains nothing and leaves a scar across the hillside for no reason.
-func _breach_from(
-	pit: int,
-	limit: float,
-	elevation: PackedFloat32Array,
-	n: int,
-	cell_size: float,
-	diagonal: float
-) -> bool:
-	var deepest: float = 0.0
-	var cell: int = pit
-	var target: float = elevation[pit]
-	var steps: int = 0
-	while true:
-		var down: int = receiver[cell]
-		if down < 0:
-			break
-		target -= config.breach_slope * _step_length(cell, down, n, cell_size, diagonal)
-		if elevation[down] <= target:
-			break
-		deepest = maxf(deepest, elevation[down] - target)
-		if deepest > limit:
-			return false
-		cell = down
-		steps += 1
-		if steps > n * 4:
-			return false
-
-	if steps == 0:
-		return false
-
-	cell = pit
-	target = elevation[pit]
-	for _i in steps:
-		var down: int = receiver[cell]
-		target -= config.breach_slope * _step_length(cell, down, n, cell_size, diagonal)
-		var cut: float = elevation[down] - target
-		elevation[down] = target
-		_widen(down, cell, target, cut, elevation, n)
-		cell = down
-	return true
-
-
-## Opens the channel out sideways in proportion to how deep it had to cut.
-##
-## A one-cell cut is a 32 m slot with vertical walls, and a deep one is worse
-## than useless: the drainage says the water is sixty metres down while the
-## interpolated land two metres to the side is still up on the divide, so the
-## chunk mesher cannot get its river valley anywhere near the water and the
-## drainage-surface contract breaks. Taking the shoulders down one ring per
-## [constant BREACH_SHOULDER] metres of cut makes the outlet a valley instead,
-## which is both what the contract needs and what a river actually leaves behind.
-func _widen(
-	down: int,
-	from_cell: int,
-	target: float,
-	cut: float,
-	elevation: PackedFloat32Array,
-	n: int
-) -> void:
-	var rings: int = mini(int(ceil(cut / BREACH_SHOULDER)), BREACH_MAX_RINGS)
-	if rings <= 0:
-		return
-	var dx: int = down % n - from_cell % n
-	var dz: int = down / n - from_cell / n
-	var cx: int = down % n
-	var cz: int = down / n
-	for ring in range(1, rings + 1):
-		var level: float = target + float(ring) * BREACH_SHOULDER
-		for side in [1, -1]:
-			var sx: int = cx - dz * side * ring
-			var sz: int = cz + dx * side * ring
-			if sx < 0 or sz < 0 or sx >= n or sz >= n:
-				continue
-			var index: int = sz * n + sx
-			elevation[index] = minf(elevation[index], level)
-
-
-static func _step_length(
-	from_cell: int, to_cell: int, n: int, cell_size: float, diagonal: float
-) -> float:
-	var dx: int = absi(to_cell % n - from_cell % n)
-	var dz: int = absi(to_cell / n - from_cell / n)
-	return diagonal if dx != 0 and dz != 0 else cell_size
-
-
-# --- Flow accumulation ---------------------------------------------------------
+# --- Flow accumulation --------------------------------------------------------------
 
 func _accumulate() -> void:
 	var count: int = filled.size()
+	var n: int = terrain.cells
 	accumulation = PackedFloat32Array()
 	accumulation.resize(count)
 	var moisture: PackedFloat32Array = terrain.moisture
 	for i in count:
 		accumulation[i] = 0.55 + moisture[i] * 0.9
 
+	# A brook that enters through a contract port arrives with the catchment it
+	# gathered next door. Starting it at zero would make the same stream a
+	# trickle on one side of the boundary and a channel on the other.
+	for port in inflow_ports:
+		var cell: Vector2i = terrain.local_cell_of(port.position.x, port.position.y)
+		if terrain.contains_local(cell.x, cell.y):
+			accumulation[cell.y * n + cell.x] += config.river_accum_threshold * 0.5
+
 	# flow_order runs downstream-first, so walking it backwards guarantees every
 	# contributor is finished before its receiver is touched.
 	for i in range(count - 1, -1, -1):
-		var cell: int = flow_order[i]
-		var down: int = receiver[cell]
+		var cell_index: int = flow_order[i]
+		var down: int = receiver[cell_index]
 		if down >= 0:
-			accumulation[down] += accumulation[cell]
+			accumulation[down] += accumulation[cell_index]
 
 
-# --- Lakes ---------------------------------------------------------------------
+# --- Local lakes -----------------------------------------------------------------------
 
 func _find_lakes() -> void:
 	var n: int = terrain.cells
@@ -382,6 +330,7 @@ func _find_lakes() -> void:
 		var min_z: float = INF
 		var max_x: float = -INF
 		var max_z: float = -INF
+		var rejected: bool = false
 
 		while not stack.is_empty():
 			var cell: int = stack[stack.size() - 1]
@@ -391,11 +340,19 @@ func _find_lakes() -> void:
 
 			var cx: int = cell % n
 			var cz: int = cell / n
-			var center: Vector2 = WorldCoords.macro_cell_center(config, Vector2i(cx, cz))
-			min_x = minf(min_x, center.x)
-			max_x = maxf(max_x, center.x)
-			min_z = minf(min_z, center.y)
-			max_z = maxf(max_z, center.y)
+			# A local lake belongs to exactly one sector, and it has to stay
+			# clear of the boundary: a basin the neighbour also touches would be
+			# flooded twice, to two spill heights, with a step between them.
+			# Both sides apply this test to the same basin, so both reject it.
+			if not _in_local_domain(cell):
+				rejected = true
+			if _is_sink(cell):
+				rejected = true
+			var centre: Vector2 = terrain.cell_center(cx, cz)
+			min_x = minf(min_x, centre.x)
+			max_x = maxf(max_x, centre.x)
+			min_z = minf(min_z, centre.y)
+			max_z = maxf(max_z, centre.y)
 
 			for k in 8:
 				var nx: int = cx + NEIGHBOR_DX[k]
@@ -412,7 +369,14 @@ func _find_lakes() -> void:
 				lake_id[nb] = lake.id
 				stack.append(nb)
 
-		if members.size() < config.lake_min_cells or deepest < config.lake_min_depth:
+		var span: float = maxf(max_x - min_x, max_z - min_z) + config.macro_cell_size
+		if (
+			rejected
+			or members.size() < config.lake_min_cells
+			or members.size() > config.lake_max_cells
+			or span > LOCAL_LAKE_MAX_SPAN
+			or deepest < config.lake_min_depth
+		):
 			for cell in members:
 				lake_id[cell] = -1
 			continue
@@ -444,7 +408,7 @@ func _find_outlet(lake: LakeData) -> int:
 	return best
 
 
-# --- Channels ------------------------------------------------------------------
+# --- Channels --------------------------------------------------------------------------
 
 func _mark_channels() -> void:
 	var count: int = filled.size()
@@ -456,13 +420,140 @@ func _mark_channels() -> void:
 			accumulation[i] >= threshold
 			and lake_id[i] == -1
 			and receiver[i] >= 0
+			and trunk[i] == 0
+			and atlas_water[i] == 0
 		)
 		is_channel[i] = 1 if channel else 0
 
 
-# --- River reaches ---------------------------------------------------------------
+# --- Trunk rivers ---------------------------------------------------------------------
 
-func _build_rivers(noise: NoiseSet) -> void:
+## Rebuilds the atlas trunks that touch this window, straight from the shared
+## corridor geometry. No smoothing, no meander, no local re-routing: whatever
+## this produces, the neighbour produces exactly the same polyline, which is the
+## only way a river can cross a sector boundary without a kink.
+func _build_trunk_rivers() -> void:
+	var stride: int = AtlasCorridors.RIVER_STRIDE
+	var rect: Rect2 = terrain.window_rect().grow(config.macro_cell_size * 4.0)
+	var bases: PackedInt32Array = corridors.rivers_in_rect(rect)
+	bases.sort()
+
+	var run: PackedInt32Array = PackedInt32Array()
+	for base in bases:
+		var continues_run: bool = (
+			not run.is_empty()
+			and base == run[run.size() - 1] + stride
+			and corridors.river_feature_ids[base / stride]
+				== corridors.river_feature_ids[run[run.size() - 1] / stride]
+		)
+		if continues_run:
+			run.append(base)
+			continue
+		_emit_trunk_reach(run)
+		run = PackedInt32Array([base])
+	_emit_trunk_reach(run)
+
+
+func _emit_trunk_reach(run: PackedInt32Array) -> void:
+	if run.size() < 1:
+		return
+	var stride: int = AtlasCorridors.RIVER_STRIDE
+	var feature_class: int = int(corridors.rivers[run[0] + 8])
+	var order: int = corridors.trunk_order(feature_class)
+
+	var reach: RiverPolyline = RiverPolyline.new()
+	reach.id = rivers.size()
+	reach.order = order
+	reach.is_trunk = true
+	reach.is_shared = true
+	reach.feature_id = corridors.river_feature_ids[run[0] / stride]
+	reach.depth = config.river_depth_base + float(order - 1) * config.river_depth_per_order
+	reach.valley = config.river_valley_base + float(order - 1) * config.river_valley_per_order
+
+	var points: PackedVector3Array = PackedVector3Array()
+	var widths: PackedFloat32Array = PackedFloat32Array()
+	for i in run.size():
+		var base: int = run[i]
+		if i == 0:
+			points.append(Vector3(
+				corridors.rivers[base], corridors.rivers[base + 1], corridors.rivers[base + 2]
+			))
+			widths.append(corridors.rivers[base + 6])
+		points.append(Vector3(
+			corridors.rivers[base + 3], corridors.rivers[base + 4], corridors.rivers[base + 5]
+		))
+		widths.append(corridors.rivers[base + 7])
+
+	if points.size() < 2:
+		return
+	reach.points = points
+	reach.half_width = widths
+	reach.compute_bounds()
+	rivers.append(reach)
+
+
+# --- Port stubs ---------------------------------------------------------------------------
+
+## The short length of channel either side of every drainage port.
+##
+## A local brook may not come within the keep-out band of a boundary, so on its
+## own it could never cross one. The stub is what carries it over: a straight
+## run of channel centred on the contract port, long enough to span the band on
+## both sides, and derived from nothing but the port and the continental
+## surface. Both neighbours build the whole stub, identically, so the ground and
+## the water line under it are the same on both sides of the seam.
+func _build_port_stubs() -> void:
+	var length: float = config.local_keepout_metres
+	var seen: Dictionary = {}
+	for port in inflow_ports + outflow_ports:
+		# Only local drainage. A trunk crossing already has its channel: the
+		# atlas polyline itself, which both sectors rebuilt from the corridor.
+		if port.kind != SectorEdgeContract.Kind.DRAIN or seen.has(port.id):
+			continue
+		seen[port.id] = true
+		_emit_port_stub(port, length)
+
+
+func _emit_port_stub(port: SectorEdgeContract.Port, length: float) -> void:
+	var order: int = 1
+	var reach: RiverPolyline = RiverPolyline.new()
+	reach.id = rivers.size()
+	reach.order = order
+	reach.is_shared = true
+	# The port's own id: stable across runs, and the same number in both
+	# sectors, so the two halves of one crossing can be recognised as one thing.
+	reach.feature_id = port.id
+	reach.depth = port.depth
+	reach.valley = port.valley
+
+	# Stations run downstream, from the far side of the boundary to the far side
+	# of this sector's keep-out band.
+	var points: PackedVector3Array = PackedVector3Array()
+	var widths: PackedFloat32Array = PackedFloat32Array()
+	var previous: float = INF
+	for i in range(-STUB_STATIONS, STUB_STATIONS + 1):
+		var s: float = float(i) / float(STUB_STATIONS) * length
+		var at: Vector2 = port.position + port.tangent * s
+		# The port's own height at the boundary, the real ground elsewhere, and
+		# never rising downstream - so the stub is a channel in the land rather
+		# than a ribbon of water laid over it.
+		var ground: float = continental.height_at(at.x, at.y)
+		var water: float = minf(ground, port.surface_z + port.grade * s)
+		if water > previous:
+			water = previous
+		previous = water
+		points.append(Vector3(at.x, water, at.y))
+		widths.append(port.half_width)
+
+	reach.points = points
+	reach.half_width = widths
+	reach.compute_bounds()
+	rivers.append(reach)
+
+
+# --- Local rivers -----------------------------------------------------------------------
+
+func _build_local_rivers(noise: NoiseSet) -> void:
 	var n: int = terrain.cells
 	var count: int = filled.size()
 
@@ -474,8 +565,6 @@ func _build_rivers(noise: NoiseSet) -> void:
 	max_up_count.resize(count)
 
 	# Upstream-first pass: Strahler order only needs each cell's tributaries.
-	# Non-channel cells still forward what reached them, so a trunk river that
-	# crosses a lake leaves it as a trunk river instead of restarting at order 1.
 	for i in range(count - 1, -1, -1):
 		var cell: int = flow_order[i]
 		var order: int = 0
@@ -483,6 +572,7 @@ func _build_rivers(noise: NoiseSet) -> void:
 			order = 1
 			if max_up[cell] > 0:
 				order = max_up[cell] + 1 if max_up_count[cell] >= 2 else max_up[cell]
+			order = mini(order, LOCAL_MAX_ORDER)
 			strahler[cell] = order
 		else:
 			order = max_up[cell]
@@ -498,19 +588,17 @@ func _build_rivers(noise: NoiseSet) -> void:
 
 	var consumed: PackedByteArray = PackedByteArray()
 	consumed.resize(count)
-	# Which reach owns each macro cell, and which cell each reach ended on.
-	# Linking on cells rather than geometry survives meandering, which moves
-	# stations off their cell centres.
 	var cell_owner: PackedInt32Array = PackedInt32Array()
 	cell_owner.resize(count)
 	for i in count:
 		cell_owner[i] = -1
-	var end_cells: PackedInt32Array = PackedInt32Array()
-	river_index = SpatialIndex2D.new(160.0)
+	var end_cells: Dictionary = {}
 
 	for i in range(count - 1, -1, -1):
 		var start: int = flow_order[i]
 		if is_channel[start] == 0 or consumed[start] != 0:
+			continue
+		if not _in_local_domain(start):
 			continue
 
 		var reach: RiverPolyline = RiverPolyline.new()
@@ -521,11 +609,23 @@ func _build_rivers(noise: NoiseSet) -> void:
 
 		var chain: PackedInt32Array = PackedInt32Array()
 		var cell: int = start
+		var joined_shared: bool = false
 		while true:
 			consumed[cell] = 1
 			chain.append(cell)
 			var down: int = receiver[cell]
 			if down < 0:
+				break
+			if not _in_local_domain(down):
+				# The brook has reached the keep-out band. If a contract port
+				# stub is waiting there it will be snapped onto it; otherwise
+				# the reach simply ends, because carrying it any further would
+				# shape ground the neighbour meshes too.
+				joined_shared = true
+				break
+			if trunk[down] != 0 or atlas_water[down] != 0:
+				chain.append(down)
+				joined_shared = true
 				break
 			if lake_id[down] != -1:
 				chain.append(down)
@@ -543,16 +643,28 @@ func _build_rivers(noise: NoiseSet) -> void:
 			continue
 
 		_chain_to_polyline(reach, chain, n, noise)
+		if joined_shared:
+			_snap_to_shared(reach)
 		for k in chain.size() - 1:
 			cell_owner[chain[k]] = reach.id
-		end_cells.append(chain[chain.size() - 1])
+		end_cells[reach.id] = chain[chain.size() - 1]
+		reach.compute_bounds()
 		rivers.append(reach)
 
 	_link_downstream(cell_owner, end_cells)
 	_join_confluences()
-	for reach in rivers:
-		reach.compute_bounds()
-	_index_rivers()
+
+
+## True for the part of the core this sector may put its own water in: the core
+## minus the keep-out band along every boundary.
+func _in_local_domain(index: int) -> bool:
+	var n: int = terrain.cells
+	var cx: int = index % n
+	var cz: int = index / n
+	return (
+		cx >= local_min.x and cz >= local_min.y
+		and cx <= local_max.x and cz <= local_max.y
+	)
 
 
 func _chain_to_polyline(
@@ -563,24 +675,58 @@ func _chain_to_polyline(
 
 	for idx in chain.size():
 		var cell: int = chain[idx]
-		var cx: int = cell % n
-		var cz: int = cell / n
-		var center: Vector2 = WorldCoords.macro_cell_center(config, Vector2i(cx, cz))
-
+		var centre: Vector2 = terrain.cell_center(cell % n, cell / n)
 		var order: float = float(maxi(reach.order, 1))
 		var half_w: float = config.river_width_base + (order - 1.0) * config.river_width_per_order
-
-		raw.append(Vector3(center.x, filled[cell], center.y))
+		raw.append(Vector3(centre.x, filled[cell], centre.y))
 		widths.append(half_w)
 
 	_apply_meander(raw, noise)
 	var smooth: PackedVector3Array = _chaikin(raw, 2)
 	var smooth_widths: PackedFloat32Array = _resample_widths(widths, smooth.size())
-
 	_force_monotonic(smooth)
 
 	reach.points = smooth
 	reach.half_width = smooth_widths
+
+
+## Pulls the last station of a brook onto the shared water it joins - an atlas
+## trunk, or the stub of a boundary port - at that water's own height.
+##
+## A confluence that misses by a few metres shows up as two water surfaces that
+## never meet. The snap only happens when there really is shared water within
+## reach; a brook that ran out of local domain with nothing to join simply ends
+## where it is.
+func _snap_to_shared(reach: RiverPolyline) -> void:
+	var last: int = reach.points.size() - 1
+	if last < 1:
+		return
+	var tip: Vector3 = reach.points[last]
+	var best: Vector3 = tip
+	var best_d: float = config.local_keepout_metres * config.local_keepout_metres
+	var found: bool = false
+	for other in rivers:
+		if not other.is_shared:
+			continue
+		for p in other.points:
+			# Only stations the brook is allowed to reach: snapping onto the
+			# part of a stub that lies inside the keep-out band would drag the
+			# brook's own carve in with it.
+			var cell: Vector2i = terrain.local_cell_of(p.x, p.z)
+			if not terrain.contains_local(cell.x, cell.y):
+				continue
+			if not _in_local_domain(cell.y * terrain.cells + cell.x):
+				continue
+			var d: float = Vector2(p.x - tip.x, p.z - tip.z).length_squared()
+			if d < best_d:
+				best_d = d
+				best = p
+				found = true
+	if not found:
+		return
+	reach.points[last] = Vector3(
+		best.x, minf(best.y, reach.points[last - 1].y), best.z
+	)
 
 
 ## Lateral wander only. Station heights are never touched, so the monotonic
@@ -653,9 +799,11 @@ static func _resample_widths(widths: PackedFloat32Array, target: int) -> PackedF
 	return out
 
 
-func _link_downstream(cell_owner: PackedInt32Array, end_cells: PackedInt32Array) -> void:
+func _link_downstream(cell_owner: PackedInt32Array, end_cells: Dictionary) -> void:
 	for reach in rivers:
-		var owner: int = cell_owner[end_cells[reach.id]]
+		if reach.is_trunk or not end_cells.has(reach.id):
+			continue
+		var owner: int = cell_owner[int(end_cells[reach.id])]
 		if owner >= 0 and owner != reach.id:
 			reach.downstream_id = owner
 
@@ -667,13 +815,13 @@ func _join_confluences() -> void:
 	for reach in rivers:
 		if reach.downstream_id < 0:
 			continue
-		var trunk: RiverPolyline = rivers[reach.downstream_id]
+		var downstream: RiverPolyline = rivers[reach.downstream_id]
 		var last_index: int = reach.points.size() - 1
 		var tip: Vector3 = reach.points[last_index]
 
-		var best: Vector3 = trunk.points[0]
+		var best: Vector3 = downstream.points[0]
 		var best_d: float = INF
-		for p in trunk.points:
+		for p in downstream.points:
 			var d: float = Vector2(p.x - tip.x, p.z - tip.z).length_squared()
 			if d < best_d:
 				best_d = d
@@ -691,7 +839,7 @@ func _index_rivers() -> void:
 			river_index.insert_segment(a.x, a.z, b.x, b.z, reach.id * 65536 + i)
 
 
-# --- Lake proximity --------------------------------------------------------------
+# --- Local lake proximity ------------------------------------------------------------
 
 func _build_lake_distance() -> void:
 	var n: int = terrain.cells
@@ -749,15 +897,19 @@ func _relax_lake(target: int, source: int, step: float) -> void:
 		lake_distance[target] = candidate
 
 
+# --- Queries ---------------------------------------------------------------------------
+
+## Local lake at a point, or -1. Atlas water is not a lake: ask
+## [ContinentalTerrain] about the sea and the atlas lakes instead.
 func lake_at(world_x: float, world_z: float) -> int:
-	if not WorldCoords.in_bounds(config, world_x, world_z):
+	var cell: Vector2i = terrain.local_cell_of(world_x, world_z)
+	if not terrain.contains_local(cell.x, cell.y):
 		return -1
-	var cell: Vector2i = WorldCoords.macro_cell_of(config, world_x, world_z)
 	return lake_id[cell.y * terrain.cells + cell.x]
 
 
 ## Nearest river station to a point, or an empty dictionary when none is close.
-## Keys: distance, half_width, water_z, order, reach.
+## Keys: distance, point, half_width, water_z, order, reach.
 func nearest_reach(world_x: float, world_z: float, radius: float) -> Dictionary:
 	var rect: Rect2 = Rect2(world_x - radius, world_z - radius, radius * 2.0, radius * 2.0)
 	var best: Dictionary = {}
@@ -799,8 +951,7 @@ func lake_distance_at(world_x: float, world_z: float) -> float:
 	return maxf(terrain.sample_field(lake_distance, world_x, world_z), 0.0)
 
 
-## Surface of the lake nearest this point, sampled as smoothly as the ground it
-## is compared against, or -INF when the world has no lakes at all.
+## Surface of the local lake nearest this point, or -INF when there is none.
 func lake_surface_near_at(world_x: float, world_z: float) -> float:
 	if lakes.is_empty():
 		return -INF

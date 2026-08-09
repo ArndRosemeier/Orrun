@@ -64,12 +64,22 @@ func running_count() -> int:
 	return _running.size()
 
 
-## Drops work that has not started yet and hands it back, so the caller can
-## forget about it. Jobs already on a worker are left alone; cancelling them
+## Drops queued work the caller no longer wants and hands it back, so it can
+## forget the jobs too. Jobs already on a worker are left alone; cancelling them
 ## mid-flight would cost more than letting them finish.
-func clear_waiting() -> Array[Job]:
-	var dropped: Array[Job] = _waiting
-	_waiting = []
+##
+## A player moving faster than the world can be built outruns the queue, and
+## without this the workers spend their time on ground that is already behind
+## the player while the ground ahead stays empty.
+func drop_waiting(should_drop: Callable) -> Array[Job]:
+	var kept: Array[Job] = []
+	var dropped: Array[Job] = []
+	for job in _waiting:
+		if should_drop.call(job):
+			dropped.append(job)
+		else:
+			kept.append(job)
+	_waiting = kept
 	return dropped
 
 

@@ -18,6 +18,14 @@ const TILE_DIVISIONS: int = 4
 const BANK_RISE: float = 1.1
 const SOLID: float = 1e6
 const AIR: float = -1e6
+## Deep rock is stored as [constant SOLID] so the volume pass can skip it, but a
+## cave has to be able to open in it. Inside the cave band the field is capped
+## to this instead, which is still unambiguously solid and still lets a tunnel
+## carve through with a smooth wall rather than a step off an enormous value.
+const CAVE_SOLID_CAP: float = 9.0
+## Metres of air a fully developed tunnel opens. Comfortably past the cap, or
+## caves would only ever appear in the few metres just under the surface.
+const CAVE_STRENGTH: float = 26.0
 
 
 class Field extends RefCounted:
@@ -64,7 +72,12 @@ class Field extends RefCounted:
 
 
 static func build(
-	cfg: WorldConfig, map: WorldMap, noise: NoiseSet, chunk: Vector2i, lod: int
+	cfg: WorldConfig,
+	sector: WorldSector,
+	continental: ContinentalTerrain,
+	noise: NoiseSet,
+	chunk: Vector2i,
+	lod: int
 ) -> Field:
 	var field: Field = Field.new()
 	field.chunk = chunk
@@ -83,24 +96,24 @@ static func build(
 		cfg.chunk_size + field.voxel * 2.0 + influence * 2.0,
 		cfg.chunk_size + field.voxel * 2.0 + influence * 2.0
 	)
-	var rivers: PackedFloat32Array = map.collect_river_segments(query_rect)
-	var roads: PackedFloat32Array = map.collect_road_segments(query_rect)
-	var fords: PackedVector3Array = _collect_fords(map, query_rect)
-	var bridge_gaps: PackedVector4Array = _collect_bridge_gaps(map, query_rect)
+	var rivers: PackedFloat32Array = sector.collect_river_segments(query_rect)
+	var roads: PackedFloat32Array = sector.collect_road_segments(query_rect)
+	var fords: PackedVector3Array = _collect_fords(sector, query_rect)
+	var bridge_gaps: PackedVector4Array = _collect_bridge_gaps(sector, query_rect)
 
 	var tile_span: float = (cfg.chunk_size + field.voxel * 2.0) / float(TILE_DIVISIONS)
 	var river_tiles: Array[PackedInt32Array] = _bin_segments(
-		rivers, WorldMap.RIVER_STRIDE, origin_x, origin_z, tile_span, influence
+		rivers, WorldSector.RIVER_STRIDE, origin_x, origin_z, tile_span, influence
 	)
 	var road_tiles: Array[PackedInt32Array] = _bin_segments(
-		roads, WorldMap.ROAD_STRIDE, origin_x, origin_z, tile_span, influence
+		roads, WorldSector.ROAD_STRIDE, origin_x, origin_z, tile_span, influence
 	)
 
 	_build_columns(
-		cfg, map, noise, field, samples_h, origin_x, origin_z,
+		cfg, sector, continental, noise, field, samples_h, origin_x, origin_z,
 		rivers, roads, river_tiles, road_tiles, tile_span, fords, bridge_gaps
 	)
-	_build_volume(cfg, map, noise, field, samples_h, origin_x, origin_z)
+	_build_volume(cfg, noise, field, samples_h, origin_x, origin_z)
 	return field
 
 
@@ -115,7 +128,8 @@ static func _max_influence(cfg: WorldConfig) -> float:
 
 static func _build_columns(
 	cfg: WorldConfig,
-	map: WorldMap,
+	sector: WorldSector,
+	continental: ContinentalTerrain,
 	noise: NoiseSet,
 	field: Field,
 	samples_h: int,
@@ -151,8 +165,8 @@ static func _build_columns(
 	field.water_top = PackedFloat32Array()
 	field.water_top.resize(count)
 
-	var terrain: MacroTerrain = map.terrain
-	var hydro: Hydrology = map.hydro
+	var terrain: MacroTerrain = sector.terrain
+	var hydro: Hydrology = sector.hydro
 	var voxel: float = field.voxel
 	var worst_error: float = 0.0
 
@@ -224,7 +238,7 @@ static func _build_columns(
 				road_z = ay + (by - ay) * t
 				road_edge_d = d - road_half
 
-			# --- lake ------------------------------------------------------------
+			# --- local lake --------------------------------------------------------
 			# A column is under a lake when the smooth drainage surface is above
 			# the smooth land surface. Both fields are sampled the same way, so
 			# the two meet on a curve rather than on a macro cell boundary, and
@@ -236,8 +250,19 @@ static func _build_columns(
 				if flat > -INF and hydro.drainage_at(wx, wz) > height:
 					lake_surface = flat
 
+			# --- ocean and atlas lakes -----------------------------------------------
+			# Not a per-sector decision at all: the waterline is the zero of the
+			# global signed shoreline function, and its height is the nearest
+			# atlas body's own surface. Two sectors sharing a coast read the same
+			# function at the same metres, so the shore cannot step at a seam.
+			var shore_d: float = continental.shore_distance(wx, wz)
+			var atlas_surface: float = -INF
+			if shore_d <= 0.0:
+				atlas_surface = continental.water_plane_at(wx, wz)
+
 			# --- corridor mask: the drainage-surface contract ---------------------
 			var nearest_wet: float = minf(river_edge_d, lake_edge_d)
+			nearest_wet = minf(nearest_wet, maxf(shore_d, 0.0))
 			var nearest_feature: float = minf(nearest_wet, road_edge_d)
 			var mask: float = smoothstep(cfg.corridor_inner, cfg.corridor_outer, nearest_feature)
 
@@ -288,6 +313,16 @@ static func _build_columns(
 				water_top = maxf(water_top, lake_surface)
 				submerged_z = maxf(submerged_z, lake_surface)
 				wet = maxf(wet, smoothstep(0.0, 2.5, lake_surface - height))
+
+			# --- carve: sea and atlas lake basins -------------------------------------
+			# The continental surface already sits below the plane wherever the
+			# signed shoreline says so; this only stops relief detail poking a
+			# 3 m rock through an otherwise flat sea.
+			if atlas_surface > -INF:
+				surface = minf(surface, minf(height, atlas_surface) - 0.05)
+				water_top = maxf(water_top, atlas_surface)
+				submerged_z = maxf(submerged_z, atlas_surface)
+				wet = maxf(wet, smoothstep(0.0, 2.5, atlas_surface - height))
 
 			# --- carve: road bench ---------------------------------------------------
 			# Roads both cut and fill, which is the one carve that can raise the
@@ -412,9 +447,9 @@ static func _bridge_gap(gaps: PackedVector4Array, wx: float, wz: float) -> float
 	return clampf(gap, 0.0, 1.0)
 
 
-static func _collect_fords(map: WorldMap, rect: Rect2) -> PackedVector3Array:
+static func _collect_fords(sector: WorldSector, rect: Rect2) -> PackedVector3Array:
 	var out: PackedVector3Array = PackedVector3Array()
-	for site in map.paths.bridges:
+	for site in sector.paths.bridges:
 		if not site.is_ford:
 			continue
 		var center: Vector3 = site.center()
@@ -423,9 +458,9 @@ static func _collect_fords(map: WorldMap, rect: Rect2) -> PackedVector3Array:
 	return out
 
 
-static func _collect_bridge_gaps(map: WorldMap, rect: Rect2) -> PackedVector4Array:
+static func _collect_bridge_gaps(sector: WorldSector, rect: Rect2) -> PackedVector4Array:
 	var out: PackedVector4Array = PackedVector4Array()
-	for site in map.paths.bridges:
+	for site in sector.paths.bridges:
 		if site.is_ford:
 			continue
 		var center: Vector3 = site.center()
@@ -475,7 +510,6 @@ static func _bin_segments(
 
 static func _build_volume(
 	cfg: WorldConfig,
-	map: WorldMap,
 	noise: NoiseSet,
 	field: Field,
 	samples_h: int,
@@ -556,7 +590,9 @@ static func _build_volume(
 							smoothstep(0.0, 6.0, cave_ceiling - wy),
 							smoothstep(0.0, 8.0, wy - cave_floor)
 						)
-						value -= tube * 9.0 * taper
+						value = (
+							minf(value, CAVE_SOLID_CAP) - tube * CAVE_STRENGTH * taper
+						)
 
 				values[base_index + iy * samples_h] = value
 

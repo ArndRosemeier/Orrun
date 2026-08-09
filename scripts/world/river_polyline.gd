@@ -17,10 +17,20 @@ var order: int = 1
 var depth: float = 1.0
 ## Distance from the channel edge over which the bank ramps back to terrain.
 var valley: float = 24.0
-## Reach this one flows into, or -1 when it leaves the map.
+## Reach this one flows into, or -1 when it ends at a boundary port.
 var downstream_id: int = -1
-## Lake this reach flows into, or -1.
+## Local lake this reach flows into, or -1.
 var ends_in_lake: int = -1
+## True when this reach is an atlas trunk, rebuilt from continental geometry
+## rather than solved locally.
+var is_trunk: bool = false
+## True when every sector that can see this reach builds it identically, from
+## data neither of them owns: an atlas trunk, or the stub of a brook pinned to
+## an edge-contract port. Only shared reaches may touch a sector boundary.
+var is_shared: bool = false
+## Atlas feature this reach belongs to, 0 for locally solved water. Stable
+## across runs and across sectors, so maps and names can refer to it.
+var feature_id: int = 0
 
 var bounds: Rect2 = Rect2()
 

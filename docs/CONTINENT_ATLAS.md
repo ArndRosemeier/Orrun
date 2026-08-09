@@ -1,6 +1,7 @@
 # Continent Atlas — design contract (v1)
 
-Status: **Phase 1 implemented** (generator + 2D viewer + tests). Amend
+Status: **Phases 1–3 implemented** (generator + 2D viewer + tests, and the 3D
+world now generated from the atlas as immutable 8 km sectors). Amend
 deliberately; do not “simplify away” continuity and come back later — that is
 how seams become permanent.
 
@@ -12,20 +13,22 @@ Tests: `godot --headless --path <project> --script res://tools/tests/atlas_tests
 
 ## 1. Why this exists
 
-Today Orrun is a single finite window: about 12 km on a side, fully baked, with
-`FarTerrain` drawing that same window at low resolution. That is enough to walk
-in and judge rivers and roads. It is not enough for:
+Orrun used to be a single finite window: about 12 km on a side, fully baked,
+with `FarTerrain` drawing that same window at low resolution. That was enough to
+walk in and judge rivers and roads. It was not enough for:
 
 - a sense that the wilderness belongs to a larger landmass
 - travel, maps, and “what’s over that ridge” beyond the baked window
 - far LODs that show coastlines, climate belts, and mountain chains decided
   before the player arrived
-- **rivers and roads that still exist** when you cross a kilometre boundary or
-  load the next window
+- **rivers and roads that still exist** when you cross a kilometre boundary
 - later content (settlements, cultures, trade) that needs continental structure
 
-The atlas is that larger landmass. The current wilderness bake becomes a
-**window** into it — detail where the player is, summary everywhere else.
+The atlas is that larger landmass. The finite window is gone: the 3D world is
+now generated as immutable **8 km sectors** refining the atlas, built on demand
+around the player and cached — detail where the player is, summary everywhere
+else, and no boundary anywhere. See
+[`ARCHITECTURE.md`](ARCHITECTURE.md) for the sector pipeline.
 
 ---
 
@@ -33,14 +36,14 @@ The atlas is that larger landmass. The current wilderness bake becomes a
 
 1. **Continental structure at 1 km resolution.** Always resident, cheap to sample.
 2. **Deterministic.** `f(world_seed, …)` only. Same seed → identical atlas.
-3. **One authority chain.** Atlas constrains the window bake; the window does
+3. **One authority chain.** Atlas constrains the sector bake; a sector does
    not invent a second planet.
 4. **Ocean is landcover, not humidity=255.** Open sea is biome `OCEAN`.
 5. **Continuity of major rivers and roads across cell borders.** Edge ports +
    in-cell wiring from day one — not a retrofit after climate looks pretty.
 6. **Every major river terminates** in atlas `OCEAN` or atlas `LAKE`. No dangling
    trunks in the middle of a plain.
-7. **Far LOD and window bake read the same atlas** for climate and corridors.
+7. **Far LOD and sector bake read the same atlas** for climate and corridors.
 
 Non-goals (still true):
 
@@ -65,7 +68,10 @@ ContinentAtlas
     └─ road graph            edge ports + in-cell links → nodes
     │
     ▼
-Window bake          MacroTerrain → Hydrology → Paths (refined + anchored)
+ContinentalTerrain   pure surface: atlas fields + corridors + detail noise
+    │
+    ▼
+Sector bake (8 km)   MacroTerrain → EdgeContracts → Hydrology → Paths
     │
     ▼
 Chunk stream         density, mesh, water, props
@@ -74,7 +80,8 @@ Chunk stream         density, mesh, water, props
 | Level | Cell size | Decides | Does not decide |
 |-------|-----------|---------|-----------------|
 | Atlas | 1 km | land/ocean, climate, coarse elev/relief, **major** river/road topology, coarse lakes | meanders, fords, bridges, brooks, cave mouths |
-| Macro | 32 m | drainage detail, full river graph in window, roads/bridges, local lakes | continental landmask |
+| Sector | 8 km | which 8 km of the lower layers is baked and cached as one immutable unit | anything continental; it refines, it does not decide |
+| Macro | 32 m | drainage detail, local brooks, local roads/bridges, local lakes | continental landmask, trunk rivers and roads |
 | Chunk | 2–16 m | walkable mesh, overhangs, caves, props | which continent you are on |
 
 ---
@@ -83,13 +90,15 @@ Chunk stream         density, mesh, water, props
 
 ### 4.1 Extent
 
-- **1000 × 1000** cells, **1 km** each → **1000 km × 1000 km**
+- **1000 × 1000** cells, **1 km** each → **1000 km × 1000 km** (design target;
+  `WorldConfig.atlas_size` defaults to 256 so booting the game does not spend a
+  minute in atlas generation)
 - Dense climate store ≈ **4 MB** at 32 bits/cell
-- Playable window ≈ **12 × 12** atlas cells (plus margin)
+- Playable extent: **all of it**. A generation sector is **8 × 8** atlas cells.
 
 Continental metres: cell `(ax, az)` covers
-`[ax, ax+1) × [az, az+1)` kilometres. Window origin is an atlas-aligned
-offset on that grid.
+`[ax, ax+1) × [az, az+1)` kilometres. Sector `(sx, sz)` covers exactly 8 cells
+on each axis, so sector and atlas grids never straddle each other.
 
 ### 4.2 Bit layout (32 bits)
 
@@ -134,9 +143,10 @@ Exact metres = linear map within bands (implementation defines one
 | 8 | `LAKE` | Atlas-scale standing water (§5) |
 | 9+ | reserved | |
 
-`LAKE` is a biome on the climate grid **and** a sink in the river graph. Local
-window bake still owns the detailed shoreline and spill elevation in metres;
-the atlas says “there is a lake basin here” and rivers may end in it.
+`LAKE` is a biome on the climate grid **and** a sink in the river graph. The
+atlas says “there is a lake basin here”, owns its surface height, and rivers may
+end in it; the 3D world refines the shoreline through the same global signed
+shoreline function on both sides of every sector boundary.
 
 ---
 
@@ -157,9 +167,10 @@ Rules:
 
 - Rivers may terminate in a lake or continue through a lake via the spill into
   an outflow river (same idea as local hydrology, coarser).
-- Local bake: if the window overlaps an atlas lake, MacroTerrain/Hydrology must
-  respect a depression / water body there; detail may refine shape but must not
-  dry the basin or move the outlet to another atlas cell without cause.
+- Local bake: where a sector overlaps an atlas lake, the continental surface
+  already carries the basin and its water plane; sector hydrology treats those
+  cells as a sink and may not dry the basin, flood past it, or move the outlet
+  to another atlas cell.
 
 Minimum presence: a non-trivial seed should produce **some** inland lakes, not
 only ocean mouths. Tests assert that.
@@ -178,7 +189,7 @@ pretty continents whose rivers die at every kilometre line.
 | Count of outs per side | Ambiguous joins; no class; no position |
 | Each cell invents its own border | Neighbours disagree |
 | Pack rivers into the 32-bit climate word | Starves climate bits; cannot hold topology |
-| Atlas stores every brook | Wrong resolution; that is window Hydrology |
+| Atlas stores every brook | Wrong resolution; that is sector Hydrology |
 | “Add continuity after far LOD looks good” | Seams become content people walk through |
 
 ### 6.2 Edge ports (shared-edge ownership)
@@ -204,7 +215,7 @@ Both cells read the same port list for that edge. There is no merge step.
 | `kind` | enum | `RIVER` or `ROAD` |
 | `feature_class` | int | River: Strahler/width band 1..4. Road: primary/secondary/trail |
 | `flow_sign` | int | Rivers only: `+1` / `-1` along the edge’s outward axis from the owner |
-| `surface_z` | int | Quantized feature height at the crossing (metres or elevation code — one mapping). Rivers: water surface. Roads: grade height. **Required** so two windows that share an edge meet vertically, not only in XZ. |
+| `surface_z` | int | Quantized feature height at the crossing (metres or elevation code — one mapping). Rivers: water surface. Roads: grade height. **Required** so two cells that share an edge meet vertically, not only in XZ. |
 
 **Caps (v1):** at most **2 river ports** and **2 road ports** per edge. Most edges
 have none. Caps exist so wiring stays tractable and far LOD stays readable.
@@ -267,8 +278,9 @@ Road link rules:
    classes. The MST and spur weights are discounted by endpoint population, so
    the trunk grows town to town.
 
-Window bake (when we reach that phase) comes after all of these in the larger
-pipeline, not as part of atlas generation.
+Sector bakes come after all of these in the larger pipeline, not as part of
+atlas generation. The atlas is finished and frozen before the first sector is
+asked for.
 
 ### 6.5 What each view draws
 
@@ -276,10 +288,11 @@ pipeline, not as part of atlas generation.
 |------|--------|
 | Atlas debug / parchment | Climate + port/link graph as straights, turns, junctions, mouths |
 | FarTerrain / horizon | Biome/elevation tint; **ribbons for major river/road links** |
-| Window bake | Full local polylines, **anchored** to ports on the window boundary |
+| Sector bake | Full local polylines; trunks reconstructed from the atlas corridors rather than routed locally |
 
 Chunk mesher does not implement tile-turn logic. It keeps today’s mesh pipeline;
-atlas ports only constrain where major features enter and leave the window.
+atlas corridors decide where major features run, and `SectorEdgeContract` decides
+how everything crosses a sector boundary.
 
 ### 6.6 Storage
 
@@ -313,10 +326,11 @@ These are to the atlas what the drainage-surface contract is to chunks.
 9. **Road backbone per landmass.** Each contiguous land component has its own
     connected primary-road graph among its nodes. No requirement to bridge ocean
     in v1 (no ships yet).
-10. **Window anchor (when window bake exists).** Each atlas river/road port on
-    the window boundary has a local channel/road within tolerance (e.g. 64 m) of
-    the port’s continental metre position **and** within a vertical tolerance of
-    `surface_z`.
+10. **Sector anchor.** Every atlas river/road crossing a sector boundary appears
+    as a port in the canonical `SectorEdgeContract` for that boundary, and both
+    neighbours derive the same port: same continental position, tangent, grade,
+    `surface_z`, width, depth and feature id. Asserted by
+    `tools/tests/seam_tests.gd`, not by inspection.
 11. **Ocean datum.** All `OCEAN` cells share one continental sea-surface height
     (§8.2). Inland `LAKE` surfaces do not use that number.
 12. **Schema stamp.** Atlas carries `schema_version` + parameter hash; mismatches
@@ -332,23 +346,24 @@ These are to the atlas what the drainage-surface contract is to chunks.
 ## 8. Contracts that must exist before code (not later)
 
 Continuity ports fix horizontal seams. These fix the seams that usually appear
-the week you add coasts, a second window, or a quest that names “the same river.”
+the week you add coasts, a second sector, or a quest that names “the same river.”
 
-### 8.1 Three coordinate spaces
+### 8.1 Two coordinate spaces
 
 Name them and never mix them in APIs:
 
 | Space | Unit | Range / notes |
 |-------|------|----------------|
-| **Continental** | metres on the 1000 km planet | Absolute. Atlas ports, window origin, save-stable positions live here. |
-| **Window** | metres relative to window origin | What today’s bake calls “world” (~0..12288). Hydrology/paths/chunks use this. |
-| **Scene** | metres after floating origin | What Godot nodes use. `WorldOrigin` already maps window↔scene; it must not be fed raw continental metres at 1e6 scale without a rebase strategy. |
+| **Continental** | metres on the planet | Absolute and authoritative. Atlas ports, sector identities, every generated polyline and every save-stable position live here. |
+| **Scene** | metres after floating origin | What Godot nodes use. `WorldOrigin` maps continental↔scene and does nothing else; rebasing never changes a generation coordinate. |
 
-Conversion is boring and mandatory:
+There is no third “window” space any more. Sector-local *cell indices* exist
+inside a bake (`MacroTerrain.origin_cell` plus a local cell), but they index a
+window onto continental metres; they are not a coordinate system anything
+outside that bake may see.
 
 ```
-continental = window_origin_continental + window_local
-scene = continental - WorldOrigin.offset   # or window-local variant — one clear path
+scene = continental - WorldOrigin.offset
 ```
 
 At ~1 000 km, float32 still has centimetre-ish precision, but double-safe integer
@@ -362,19 +377,22 @@ noisy float positions.
 The atlas adds one narrow exception:
 
 - **`OCEAN` biome** has a single continental **sea surface height** (metres),
-  used when a window touches ocean — shoreline and coastal sinks agree.
-- **`LAKE` basins** keep per-basin spill heights (atlas class now, metres in the
-  window bake). They never snap to sea level.
+  used wherever a sector touches ocean — shoreline and coastal sinks agree.
+- **`LAKE` basins** keep per-basin spill heights, and an atlas lake's height is
+  atlas-owned because it can span sectors. They never snap to sea level.
+- **Local (sector-owned) lakes** still keep their own spill height, and are only
+  accepted when the whole basin is inside one sector's local domain.
 
-Without an ocean datum, every coastal window invents its own shoreline height and
-the coast seams when the window slides.
+Without an ocean datum, every coastal sector invents its own shoreline height
+and the coast steps at every boundary.
 
 ### 8.3 Coastline authority
 
 - Atlas decides which cells are `OCEAN` / `COAST` / land / `LAKE`.
-- Local bake may **fractalize** the shoreline *inside* coastal cells (and a
-  narrow skirt into neighbours) for nice bays.
-- Local bake may **not** flood a pure inland plains cell into ocean, nor dry an
+- The shoreline is **fractalized once**, by `ContinentalTerrain`, as a pure
+  function of continental metres. No sector classifies its own shore, so both
+  sides of a boundary find the same waterline, beach slope and bank profile.
+- Refinement may **not** flood a pure inland plains cell into ocean, nor dry an
   `OCEAN` cell into walkable land, nor delete an atlas `LAKE` basin.
 
 That one rule prevents “pretty local coasts” from rewriting the continent.
@@ -418,17 +436,18 @@ Rivers, lakes, roads, and nodes need ids that survive regeneration:
 - `lake_id`, `river_id`, `road_id`, `node_id` from hash(seed, type, anchor)
 - Ports reference `river_id` / `road_id`
 - Future names, quests, and maps key off these — not off “the third polyline
-  in the window bake”
+  in the sector bake”
 
-Window-local reaches are allowed extra ephemeral ids, but must record which
-atlas `river_id` they refine when they are anchors.
+Sector-local reaches are allowed extra ephemeral ids, but must record which
+atlas `river_id` or `road_id` they refine. `RiverPolyline.feature_id` and
+`RoadEdge.feature_id` carry that parent identity through the bake.
 
 ### 8.7 Landmass components
 
 After landmask, label contiguous land components (`landmass_id` per land cell).
 
 - Road graphs are built **per landmass** (invariant 9).
-- Spawn and window placement pick a landmass explicitly.
+- Spawn picks a landmass explicitly, by way of a ranked river mouth.
 - Avoids a “connected primary backbone” invariant that is impossible when the
   ocean collar creates islands.
 
@@ -437,7 +456,8 @@ After landmask, label contiguous land components (`landmass_id` per land cell).
 After `ContinentAtlas.generate`:
 
 - Atlas is **immutable** for the rest of the run.
-- All window/chunk workers may read it with no locks.
+- All sector/chunk workers may read it with no locks, through the shared
+  immutable `WorldContext`.
 - No “fix up this lake” mutation — change seed or parameters and regenerate.
 
 Matches the existing bake philosophy; say it so nobody caches a mutable atlas on
@@ -447,13 +467,14 @@ the streamer.
 
 Atlas biome is not a paintbrush on chunk vertices. Define a table now:
 
-- atlas `FOREST` → bias window moisture/temperature/relief into the existing
+- atlas `FOREST` → bias local moisture/temperature/relief into the existing
   `BiomeTable` forest band
 - atlas `ARID` → opposite bias
 - etc.
 
-Without this, far LOD shows green forest and the walkable window is grey rock
-because local noise ignored the atlas.
+Without this, far LOD shows green forest and the walkable ground is grey rock
+because local noise ignored the atlas. Both now read the same
+`ContinentalTerrain` fields, so they cannot disagree.
 
 ### 8.10 Vocabulary
 
@@ -467,25 +488,32 @@ grid. Atlas: **atlas cell** = 1 km. Docs, APIs, and debug HUD must say which.
   `atlas_content_hash`) so any cached bake invalidates when collar width, port
   caps, or elevation mapping change
 
-### 8.12 Window motion policy (decide shape now, implement in Phase 3)
+### 8.12 Sector policy (supersedes the sliding window)
 
-When the player approaches a window edge:
+The original plan here was a 12 km window that slid with hysteresis and rebaked
+with overlap. That is now explicitly **rejected**: a moving window means the
+same metre of ground is solved twice from two different catchments, so local
+hydrology, lakes and roads change under the player as the window moves.
 
-- **Preferred:** sliding window with hysteresis (shift origin by N atlas cells,
-  rebake, keep overlap so ports on the shared interior stay consistent)
-- **Not:** teleport to a disjoint window without treating boundary ports as the
-  seam contract
+The policy instead:
 
-Exact hysteresis metres can be tuned later; the existence of a slide-with-overlap
-policy is architectural.
+- The world is partitioned into fixed **8 km sectors**, aligned to the atlas
+  (8 cells) and to chunks (125 chunks). A sector's content depends on
+  `(seed, sector coordinate, atlas hash)` and on nothing else.
+- A sector bake reads a 1024 m halo past its core and publishes only the core.
+- Everything crossing a boundary is either a pure continental function or a
+  canonical `SectorEdgeContract` port both neighbours derive identically.
+- Sector-local features keep `local_keepout_metres` clear of the boundary.
+- Crossing an edge loads the next immutable sector. Nothing is ever rebaked
+  because the player moved.
 
 ### 8.13 Atlas-scale river × road crossings
 
 Where a road link and a river link cross in the same cell (or share a cell with
 orthogonal ports), record an **`AtlasCrossing`** (cell, river_id, road_id,
-class pair). Window PathNetwork should prefer placing its bridge/ford near that
-site. Cheap to store; painful to rediscover when every bridge sits a kilometre
-off the atlas highway.
+class pair). Sector `PathNetwork` should prefer placing its bridge/ford near
+that site. Cheap to store; painful to rediscover when every bridge sits a
+kilometre off the atlas highway.
 
 ---
 
@@ -493,17 +521,21 @@ off the atlas highway.
 
 ### 9.1 Authority
 
-When baking a window:
+When baking a sector:
 
-1. Sample atlas climate under the window (with margin).
-2. Bias MacroTerrain toward atlas elevation / humidity / relief / biome via the
-   §8.9 mapping table.
-3. Use atlas ocean datum + shoreline and atlas `LAKE` basins as hydrology sinks /
-   reserved water (§8.2–8.3).
-4. **Anchor** local major rivers and roads to atlas ports (`t` + `surface_z`) and
-   soft-bias corridors (§8.4); prefer `AtlasCrossing` sites for bridges (§8.13).
-5. Local systems still own meanders, brooks, fords, bridges, detailed lake
-   shores — they may not erase or relocate atlas trunks across a cell border.
+1. `AtlasFields` interpolates atlas elevation / humidity / relief / water under
+   the sector and its halo.
+2. `ContinentalTerrain` refines that into a continuous surface: detail noise,
+   the §8.9 biome bias, the fractal shoreline, and a carved valley along every
+   atlas river corridor.
+3. Atlas ocean, atlas lakes and atlas trunks are hydrology sinks and reserved
+   water (§8.2–8.3); the sector solves only what is left.
+4. Trunk rivers and roads are **reconstructed** from `AtlasCorridors`, not routed
+   locally, and draped onto the continental surface; `AtlasCrossing` sites are
+   preferred for bridges (§8.13).
+5. Local systems still own meanders, brooks, fords, bridges and local lake
+   shores — inside the local domain only. They may not erase or relocate atlas
+   trunks, and they may not touch the boundary band.
 
 ### 9.2 Far LOD
 
@@ -512,11 +544,15 @@ When baking a window:
 - Major corridors as ribbons from reconstructed link corridors.
 - Streamed chunks always win where they overlap.
 
-### 9.3 Windows
+### 9.3 Sectors
 
-- Window origin on continental grid; size stays ~12 km for performance.
-- Motion follows §8.12 (slide with overlap); atlas stays immutable (§8.8).
-- Continuity across window moves is exactly what ports + `surface_z` are for.
+- Sector grid is fixed and atlas-aligned; identity is the sector coordinate
+  (§8.12). Nothing slides.
+- `SectorManager` bakes ahead, publishes atomically and caches; the atlas stays
+  immutable (§8.8).
+- Continuity between sectors is what `SectorEdgeContract` and the pure
+  continental surface are for; atlas ports + `surface_z` are what those
+  contracts are built from.
 
 ---
 
@@ -573,14 +609,16 @@ per-cell field labels when zoomed in.
 - Horizon from climate + lake/ocean
 - Ribbons along reconstructed corridors
 
-### Phase 3 — Window constrained by atlas
+### Phase 3 — World generated from the atlas as sectors ✅
 
-- Continental ↔ window ↔ scene conversions (§8.1)
-- MacroTerrain bias via biome mapping (§8.9)
-- Hydro sinks, coastline authority, port anchors including `surface_z`
-- Soft corridors + crossing hints for bridges
-- Sliding-window policy (§8.12); invariant 10+
-- Spawn on a chosen landmass
+- Continental ↔ scene conversions only (§8.1)
+- Continental surface: atlas bias via biome mapping (§8.9), fractal coastline,
+  corridor valleys
+- Hydro sinks, coastline authority, trunks reconstructed from corridors
+- Crossing hints for bridges
+- Immutable 8 km sectors with canonical edge contracts (§8.12); invariant 10
+- Spawn beside a ranked river mouth
+- Seam suite: `tools/tests/seam_tests.gd`
 
 ### Phase 4 — Content
 
@@ -596,7 +634,8 @@ Ship Phase 1 as one unit — climate **with** continuity and §8 contracts.
 | Risk | Mitigation |
 |------|------------|
 | Deferred continuity | Phase 1 graphs; CI on §7 |
-| Height mismatch at borders | `surface_z` on ports |
+| Height mismatch at borders | `surface_z` on ports; pure continental surface; `seam_tests.gd` |
+| Local features straddling a sector edge | `local_keepout_metres` band (§8.12) |
 | Coastal sea height disagree | Single ocean datum (§8.2) |
 | Local coast rewrites continent | Coastline authority (§8.3) |
 | Ambiguous edge joins | Edge-owned ports with `t` |
@@ -613,7 +652,7 @@ Ship Phase 1 as one unit — climate **with** continuity and §8 contracts.
 ## 13. Remaining open questions
 
 1. **Temperature / latitude:** noise-derived now, or explicit field later?
-2. **Window placement UX:** seed-fixed vs player picks on preview?
+2. **Spawn UX:** seed-fixed river mouth (today) vs player picks on a preview?
 3. **Climate storage shape:** `PackedInt32Array` vs four byte planes?
 4. **Primary road density:** ~30 vs ~100 nodes per large landmass (tuning).
 5. **`surface_z` units:** **locked — quantized metres** (see `AtlasPack.elevation_to_metres`).
@@ -628,9 +667,10 @@ Ship Phase 1 as one unit — climate **with** continuity and §8 contracts.
 - Sparse graphs; stable ids; typed nodes; atlas crossings
 - Ocean datum for sea only; inland lakes per-basin
 - Coastline authority; hard ports / soft corridors
-- Continental / window / scene spaces; landmass ids
+- Continental / scene spaces; landmass ids
 - Atlas immutable; schema version + content hash
-- Biome → local mapping; sliding window with overlap
+- Biome → local mapping; immutable 8 km sectors with canonical edge contracts
+  (the sliding window is rejected, §8.12)
 - Phase 1 = climate + continuity + §8 contracts together
 - World seed in every hash; fauna derived
 
