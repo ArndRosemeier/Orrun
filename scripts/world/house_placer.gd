@@ -9,8 +9,6 @@ extends RefCounted
 const WATERLINE_MARGIN: float = 0.35
 ## ~18° — houses want a pad, not a hillside.
 const MIN_UPNESS: float = 0.95
-## Bury most of the authored plinth; a short band still shows above grade.
-const FOUNDATION_SINK: float = 0.55
 ## Reject if the finished surface still tilts this much across the footprint.
 const MAX_FOOTPRINT_RELIEF: float = 0.65
 
@@ -34,7 +32,7 @@ static func place(
 		var basis: Basis = Basis(Vector3.UP, site.yaw)
 		var local: Vector3 = Vector3(
 			site.world_x - chunk_origin.x,
-			surface_y - FOUNDATION_SINK,
+			surface_y - site.seat_sink,
 			site.world_z - chunk_origin.y
 		)
 		var list: Array = result.get(site.catalog_id, [])

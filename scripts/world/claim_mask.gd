@@ -13,6 +13,8 @@ class Claim extends RefCounted:
 	var center: Vector2 = Vector2.ZERO
 	var radius: float = 0.0
 	var ground_z: float = 0.0
+	## Built envelope for settlements (houses/crofts); meadow starts outside this.
+	var built_radius: float = 0.0
 
 	func contains(x: float, z: float) -> bool:
 		return Vector2(x, z).distance_squared_to(center) <= radius * radius
@@ -22,13 +24,20 @@ var claims: Array[Claim] = []
 var _index: SpatialIndex2D = SpatialIndex2D.new(256.0)
 
 
-func add(kind: StringName, center: Vector2, radius: float, ground_z: float) -> Claim:
+func add(
+	kind: StringName,
+	center: Vector2,
+	radius: float,
+	ground_z: float,
+	built_radius: float = 0.0
+) -> Claim:
 	var claim: Claim = Claim.new()
 	claim.id = claims.size()
 	claim.kind = kind
 	claim.center = center
 	claim.radius = radius
 	claim.ground_z = ground_z
+	claim.built_radius = built_radius
 	claims.append(claim)
 	_index.insert_segment(
 		center.x - radius, center.y - radius,
@@ -47,12 +56,18 @@ func claims_in_rect(rect: Rect2) -> Array[Claim]:
 
 ## Kind of the claim covering this point, or empty when the land is free.
 func kind_at(x: float, z: float) -> StringName:
+	var claim: Claim = claim_at(x, z)
+	return claim.kind if claim != null else &""
+
+
+## First claim covering this point, or null when free.
+func claim_at(x: float, z: float) -> Claim:
 	var rect: Rect2 = Rect2(x - 1.0, z - 1.0, 2.0, 2.0)
 	for id in _index.query_rect(rect):
 		var claim: Claim = claims[id]
 		if claim.contains(x, z):
-			return claim.kind
-	return &""
+			return claim
+	return null
 
 
 func is_reserved(x: float, z: float) -> bool:

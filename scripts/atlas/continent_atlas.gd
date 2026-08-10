@@ -51,6 +51,9 @@ var river_links: Dictionary = {}
 var road_links: Dictionary = {}
 ## Land cell -> downhill receiver cell index (-1 when flowing into ocean/lake).
 var river_receiver: PackedInt32Array = PackedInt32Array()
+## Ring distance to nearest river mouth (0 on mouth, -1 outside hinterland).
+## Filled during [_seed_population]; used by village tier classification.
+var mouth_distance: PackedInt32Array = PackedInt32Array()
 
 var generate_ms: int = 0
 ## Scratch while [_build_roads] runs; not part of the published atlas.
@@ -1291,7 +1294,7 @@ func _classify_land(
 ## anchor the densest cores. Most land stays at 0.
 func _seed_population() -> void:
 	var count: int = size * size
-	var mouth_dist: PackedInt32Array = _river_mouth_distances()
+	mouth_distance = _river_mouth_distances()
 	var grain: FastNoiseLite = _make_noise(
 		"atlas_population", 0.045, FastNoiseLite.FRACTAL_FBM, 3
 	)
@@ -1307,7 +1310,7 @@ func _seed_population() -> void:
 			var pop: int = 0
 			if AtlasBiomes.is_land(biome):
 				var score: float = _population_score(
-					ax, az, idx, packed, biome, mouth_dist[idx], grain, region
+					ax, az, idx, packed, biome, mouth_distance[idx], grain, region
 				)
 				if score > POPULATION_THRESHOLD:
 					var t: float = (score - POPULATION_THRESHOLD) / POPULATION_SCORE_SPAN
@@ -1319,6 +1322,13 @@ func _seed_population() -> void:
 				AtlasPack.relief(packed),
 				pop
 			)
+
+
+## Mouth hinterland ring distance for a cell, or -1 when outside it.
+func mouth_distance_at(ax: int, az: int) -> int:
+	if not in_bounds(ax, az) or mouth_distance.is_empty():
+		return -1
+	return mouth_distance[index_of(ax, az)]
 
 
 ## Ring distance from each land cell to the nearest river mouth, capped at

@@ -11,13 +11,14 @@ extends Node3D
 ## held frozen until there is real collision under the spawn point.
 
 const CATALOG_PATH: String = "res://assets/catalog/props.json"
-## Fresh-profile landing: ocean mouth repro (continental metres).
-const DEFAULT_SPAWN_XZ: Vector2 = Vector2(177930.0, 54553.0)
+## Fresh-profile landing: densest river-mouth port plaza (continental metres).
+const DEFAULT_SPAWN_XZ: Vector2 = Vector2(173515.5, 39501.2)
 const SESSION_PATH: String = "user://player_session.cfg"
 const TERRAIN_SHADER: String = "res://shaders/terrain.gdshader"
 const WATER_SHADER: String = "res://shaders/water.gdshader"
 
 @onready var streamer: Streamer = $Streamer
+@onready var fauna_sim: FaunaSim = $FaunaSim
 @onready var player: PlayerController = $Player
 @onready var debug_hud: Control = $UI/DebugHud
 @onready var hydro_map: Control = $UI/HydroMap
@@ -152,6 +153,10 @@ func _on_world_ready() -> void:
 	PropLibrary.load_catalog(specs, CATALOG_PATH)
 	var clutter_specs: Array[GroundClutter.Spec] = GroundClutter.load_specs()
 	PropLibrary.load_sources(GroundClutter.mesh_sources())
+	VillageCatalog.load_catalog()
+	PropLibrary.load_sources(VillageCatalog.mesh_sources(), VillageCatalog.mesh_scale())
+	FarmCatalog.load_catalog()
+	PropLibrary.load_sources(FarmCatalog.mesh_sources(), FarmCatalog.mesh_scale())
 	BridgeLibrary.load_catalog()
 
 	sectors = SectorManager.new(context)
@@ -169,10 +174,11 @@ func _on_world_ready() -> void:
 		context, sectors, player, specs, _terrain_material, _water_material,
 		clutter_specs
 	)
+	fauna_sim.setup(context, sectors, streamer, player)
 	hydro_map.build(sectors, player)
 	world_map.setup_for_game(context.atlas, player)
 	world_map.teleport_requested.connect(_teleport_to_map)
-	debug_hud.bind(streamer, sectors, player)
+	debug_hud.bind(streamer, sectors, player, fauna_sim)
 	debug_hud.visible = true
 	terrain_tune.bind(streamer, config)
 

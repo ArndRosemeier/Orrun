@@ -1,4 +1,4 @@
-[gd_scene load_steps=12 format=3]
+[gd_scene load_steps=13 format=3]
 
 [ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
 [ext_resource type="Script" path="res://scripts/world/streamer.gd" id="2_streamer"]
@@ -7,6 +7,7 @@
 [ext_resource type="Script" path="res://scripts/debug/hydro_map.gd" id="5_map"]
 [ext_resource type="Script" path="res://scripts/atlas/atlas_viewer.gd" id="6_world_map"]
 [ext_resource type="Script" path="res://scripts/debug/terrain_tune_panel.gd" id="7_tune"]
+[ext_resource type="Script" path="res://scripts/fauna/fauna_sim.gd" id="8_fauna"]
 
 [sub_resource type="ProceduralSkyMaterial" id="Sky_1"]
 sky_top_color = Color(0.35, 0.52, 0.78, 1)
@@ -70,6 +71,9 @@ shadow_normal_bias = 1.5
 
 [node name="Streamer" type="Node3D" parent="."]
 script = ExtResource("2_streamer")
+
+[node name="FaunaSim" type="Node3D" parent="."]
+script = ExtResource("8_fauna")
 
 [node name="Player" type="CharacterBody3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 200, 0)

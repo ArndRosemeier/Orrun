@@ -891,7 +891,35 @@ func _apply_crossing_profile(road: RoadEdge) -> void:
 
 func _index_roads() -> void:
 	for road in roads:
-		for i in range(road.points.size() - 1):
-			var a: Vector3 = road.points[i]
-			var b: Vector3 = road.points[i + 1]
-			road_index.insert_segment(a.x, a.z, b.x, b.z, road.id * 65536 + i)
+		_index_road(road)
+
+
+func _index_road(road: RoadEdge) -> void:
+	for i in range(road.points.size() - 1):
+		var a: Vector3 = road.points[i]
+		var b: Vector3 = road.points[i + 1]
+		road_index.insert_segment(a.x, a.z, b.x, b.z, road.id * 65536 + i)
+
+
+## Drape settlement hollow-ways as local trail-tier edges after the plan grows.
+func append_settlement_lanes(
+	polylines: Array[PackedVector2Array], half_width: float = 1.8
+) -> void:
+	assert(half_width > 0.0, "Settlement lane half_width must be positive")
+	for poly in polylines:
+		if poly.size() < 2:
+			continue
+		var road: RoadEdge = RoadEdge.new()
+		road.id = roads.size()
+		road.tier = RoadEdge.Tier.TRAIL
+		road.half_width = half_width
+		road.is_trunk = false
+		var points: PackedVector3Array = PackedVector3Array()
+		for p in poly:
+			points.append(_draped(p.x, p.y))
+		if points.size() < 2:
+			continue
+		road.points = points
+		road.compute_bounds()
+		roads.append(road)
+		_index_road(road)

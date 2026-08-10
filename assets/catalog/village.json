@@ -1,0 +1,394 @@
+{
+	"comment": "Quaternius Medieval Village Pack. Meshes under assets/library/village/. mesh_scale is gameplay human-scale. size_x/size_z are oriented local XZ metres after mesh_scale (door axis = local Z). footprint = max(size_x,size_z)*1.15 for legacy square seating. min_tier: 0=hamlet 1=village 2=town 3=port. role=part is catalog-only.",
+	"mesh_scale": 4.28261366219508,
+	"village": [
+		{
+			"footprint": 13.09,
+			"height": 14.52,
+			"id": "House_1",
+			"min_tier": 0.0,
+			"role": "dwelling",
+			"size_x": 9.18,
+			"size_z": 11.39,
+			"source": "village/House_1.fbx",
+			"yaw_offset": 0.0
+		},
+		{
+			"footprint": 16.84,
+			"height": 13.92,
+			"id": "House_2",
+			"min_tier": 0.0,
+			"role": "dwelling",
+			"size_x": 9.51,
+			"size_z": 14.65,
+			"source": "village/House_2.fbx",
+			"yaw_offset": 0.0
+		},
+		{
+			"footprint": 10.46,
+			"height": 8.95,
+			"id": "House_3",
+			"min_tier": 0.0,
+			"role": "dwelling",
+			"size_x": 8.3,
+			"size_z": 9.09,
+			"source": "village/House_3.fbx",
+			"yaw_offset": 0.0
+		},
+		{
+			"footprint": 10.46,
+			"height": 4.6,
+			"id": "House_4",
+			"min_tier": 0.0,
+			"role": "dwelling",
+			"size_x": 8.3,
+			"size_z": 9.09,
+			"source": "village/House_4.fbx",
+			"yaw_offset": 0.0
+		},
+		{
+			"footprint": 4.94,
+			"height": 5.36,
+			"id": "Well",
+			"min_tier": 0.0,
+			"role": "civic",
+			"size_x": 2.85,
+			"size_z": 4.3,
+			"source": "village/Well.fbx",
+			"yaw_offset": 0.0
+		},
+		{
+			"footprint": 19.84,
+			"height": 14.95,
+			"id": "Inn",
+			"min_tier": 2.0,
+			"role": "civic",
+			"size_x": 17.26,
+			"size_z": 17.22,
+			"source": "village/Inn.fbx",
+			"yaw_offset": 0.0
+		},
+		{
+			"footprint": 19.16,
+			"height": 12.86,
+			"id": "Blacksmith",
+			"min_tier": 2.0,
+			"role": "civic",
+			"size_x": 16.66,
+			"size_z": 14.06,
+			"source": "village/Blacksmith.fbx",
+			"yaw_offset": 0.0
+		},
+		{
+			"footprint": 16.73,
+			"height": 17.74,
+			"id": "Mill",
+			"min_tier": 2.0,
+			"role": "civic",
+			"size_x": 14.55,
+			"size_z": 11.21,
+			"source": "village/Mill.fbx",
+			"yaw_offset": 0.0
+		},
+		{
+			"footprint": 21.67,
+			"height": 12.26,
+			"id": "Sawmill",
+			"min_tier": 2.0,
+			"role": "civic",
+			"size_x": 18.84,
+			"size_z": 14.06,
+			"source": "village/Sawmill.fbx",
+			"yaw_offset": 0.0
+		},
+		{
+			"footprint": 23.15,
+			"height": 10.66,
+			"id": "Stable",
+			"min_tier": 2.0,
+			"role": "civic",
+			"size_x": 20.13,
+			"size_z": 14.25,
+			"source": "village/Stable.fbx",
+			"yaw_offset": 0.0
+		},
+		{
+			"footprint": 10.98,
+			"height": 20.39,
+			"id": "Bell_Tower",
+			"min_tier": 3.0,
+			"role": "civic",
+			"size_x": 8.3,
+			"size_z": 9.54,
+			"source": "village/Bell_Tower.fbx",
+			"yaw_offset": 0.0
+		},
+		{
+			"footprint": 6.2,
+			"height": 5.77,
+			"id": "Gazebo",
+			"min_tier": 2.0,
+			"role": "civic",
+			"size_x": 4.44,
+			"size_z": 5.39,
+			"source": "village/Gazebo.fbx",
+			"yaw_offset": 0.0
+		},
+		{
+			"footprint": 3.88,
+			"height": 1.4,
+			"id": "Fence",
+			"min_tier": 0.0,
+			"role": "prop",
+			"source": "village/Fence.fbx"
+		},
+		{
+			"footprint": 5.86,
+			"height": 4.48,
+			"id": "MarketStand_1",
+			"min_tier": 1.0,
+			"role": "prop",
+			"source": "village/MarketStand_1.fbx"
+		},
+		{
+			"footprint": 5.68,
+			"height": 4.46,
+			"id": "MarketStand_2",
+			"min_tier": 1.0,
+			"role": "prop",
+			"source": "village/MarketStand_2.fbx"
+		},
+		{
+			"footprint": 0.62,
+			"height": 0.76,
+			"id": "Hay",
+			"min_tier": 0.0,
+			"role": "prop",
+			"source": "village/Hay.fbx"
+		},
+		{
+			"footprint": 0.76,
+			"height": 0.86,
+			"id": "Barrel",
+			"min_tier": 0.0,
+			"role": "prop",
+			"source": "village/Barrel.fbx"
+		},
+		{
+			"footprint": 0.8,
+			"height": 0.7,
+			"id": "Crate",
+			"min_tier": 0.0,
+			"role": "prop",
+			"source": "village/Crate.fbx"
+		},
+		{
+			"footprint": 1.32,
+			"height": 0.46,
+			"id": "Bags",
+			"min_tier": 0.0,
+			"role": "prop",
+			"source": "village/Bags.fbx"
+		},
+		{
+			"footprint": 0.74,
+			"height": 0.24,
+			"id": "Bag",
+			"min_tier": 0.0,
+			"role": "prop",
+			"source": "village/Bag.fbx"
+		},
+		{
+			"footprint": 4.56,
+			"height": 3.4,
+			"id": "Cart",
+			"min_tier": 1.0,
+			"role": "prop",
+			"source": "village/Cart.fbx"
+		},
+		{
+			"footprint": 3.26,
+			"height": 1.34,
+			"id": "Bench_1",
+			"min_tier": 1.0,
+			"role": "prop",
+			"source": "village/Bench_1.fbx"
+		},
+		{
+			"footprint": 3.26,
+			"height": 0.8,
+			"id": "Bench_2",
+			"min_tier": 1.0,
+			"role": "prop",
+			"source": "village/Bench_2.fbx"
+		},
+		{
+			"footprint": 2.0,
+			"height": 0.48,
+			"id": "Bonfire",
+			"min_tier": 0.0,
+			"role": "prop",
+			"source": "village/Bonfire.fbx"
+		},
+		{
+			"footprint": 2.0,
+			"height": 1.52,
+			"id": "Bonfire_Lit",
+			"min_tier": 1.0,
+			"role": "prop",
+			"source": "village/Bonfire_Lit.fbx"
+		},
+		{
+			"footprint": 1.78,
+			"height": 1.08,
+			"id": "Cauldron",
+			"min_tier": 1.0,
+			"role": "prop",
+			"source": "village/Cauldron.fbx"
+		},
+		{
+			"footprint": 1.36,
+			"height": 0.56,
+			"id": "Package_1",
+			"min_tier": 1.0,
+			"role": "prop",
+			"source": "village/Package_1.fbx"
+		},
+		{
+			"footprint": 0.94,
+			"height": 0.68,
+			"id": "Package_2",
+			"min_tier": 1.0,
+			"role": "prop",
+			"source": "village/Package_2.fbx"
+		},
+		{
+			"footprint": 2.4,
+			"height": 0.22,
+			"id": "Path_Square",
+			"min_tier": 1.0,
+			"role": "prop",
+			"source": "village/Path_Square.fbx"
+		},
+		{
+			"footprint": 4.82,
+			"height": 0.2,
+			"id": "Path_Straight",
+			"min_tier": 1.0,
+			"role": "prop",
+			"source": "village/Path_Straight.fbx"
+		},
+		{
+			"footprint": 1.24,
+			"height": 0.74,
+			"id": "Rock_1",
+			"min_tier": 0.0,
+			"role": "prop",
+			"source": "village/Rock_1.fbx"
+		},
+		{
+			"footprint": 1.18,
+			"height": 0.64,
+			"id": "Rock_2",
+			"min_tier": 0.0,
+			"role": "prop",
+			"source": "village/Rock_2.fbx"
+		},
+		{
+			"footprint": 1.48,
+			"height": 0.34,
+			"id": "Rock_3",
+			"min_tier": 0.0,
+			"role": "prop",
+			"source": "village/Rock_3.fbx"
+		},
+		{
+			"footprint": 3.12,
+			"height": 3.14,
+			"id": "Bell",
+			"min_tier": 2.0,
+			"role": "prop",
+			"source": "village/Bell.fbx"
+		},
+		{
+			"footprint": 1.0,
+			"height": 0.46,
+			"id": "Bag_Open",
+			"min_tier": 99.0,
+			"role": "part",
+			"source": "village/Bag_Open.fbx"
+		},
+		{
+			"footprint": 2.48,
+			"height": 3.1,
+			"id": "Door_Round",
+			"min_tier": 99.0,
+			"role": "part",
+			"source": "village/Door_Round.fbx"
+		},
+		{
+			"footprint": 2.48,
+			"height": 3.02,
+			"id": "Door_Straight",
+			"min_tier": 99.0,
+			"role": "part",
+			"source": "village/Door_Straight.fbx"
+		},
+		{
+			"footprint": 2.48,
+			"height": 0.52,
+			"id": "Stairs",
+			"min_tier": 99.0,
+			"role": "part",
+			"source": "village/Stairs.fbx"
+		},
+		{
+			"footprint": 2.18,
+			"height": 4.56,
+			"id": "Smoke",
+			"min_tier": 99.0,
+			"role": "part",
+			"source": "village/Smoke.fbx"
+		},
+		{
+			"footprint": 8.4,
+			"height": 2.32,
+			"id": "Sawmill_saw",
+			"min_tier": 99.0,
+			"role": "part",
+			"source": "village/Sawmill_saw.fbx"
+		},
+		{
+			"footprint": 1.88,
+			"height": 1.64,
+			"id": "Window_1",
+			"min_tier": 99.0,
+			"role": "part",
+			"source": "village/Window_1.fbx"
+		},
+		{
+			"footprint": 2.2,
+			"height": 1.6,
+			"id": "Window_2",
+			"min_tier": 99.0,
+			"role": "part",
+			"source": "village/Window_2.fbx"
+		},
+		{
+			"footprint": 2.2,
+			"height": 2.4,
+			"id": "Window_3",
+			"min_tier": 99.0,
+			"role": "part",
+			"source": "village/Window_3.fbx"
+		},
+		{
+			"footprint": 2.2,
+			"height": 2.4,
+			"id": "Window_4",
+			"min_tier": 99.0,
+			"role": "part",
+			"source": "village/Window_4.fbx"
+		}
+	]
+}

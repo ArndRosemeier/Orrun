@@ -5,6 +5,7 @@ extends Control
 var streamer: Streamer
 var sectors: SectorManager
 var player: Node3D
+var fauna_sim: Node
 
 var _label: Label
 
@@ -21,11 +22,15 @@ func _ready() -> void:
 
 
 func bind(
-	world_streamer: Streamer, sector_manager: SectorManager, player_node: Node3D
+	world_streamer: Streamer,
+	sector_manager: SectorManager,
+	player_node: Node3D,
+	fauna: Node = null
 ) -> void:
 	streamer = world_streamer
 	sectors = sector_manager
 	player = player_node
+	fauna_sim = fauna
 
 
 func _process(_delta: float) -> void:
@@ -89,5 +94,7 @@ func _process(_delta: float) -> void:
 			streamer.stat_worst_contract_error,
 		]
 	)
+	if fauna_sim != null:
+		lines.append(str(fauna_sim.call("debug_summary")))
 	lines.append("F1 hud   F4 terrain tune   M map   F3 corridor mask   V fly   Esc mouse")
 	_label.text = "\n".join(lines)

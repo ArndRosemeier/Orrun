@@ -1,0 +1,166 @@
+{
+	"comment": "Quaternius Farm Buildings + Ultimate Crops (mature *_Crop). mesh_scale matches village (FBX bake × pack scale). footprint/height from scaled AABB (max_xz * 1.15).",
+	"farm": [
+		{
+			"footprint": 39.64,
+			"height": 25.73,
+			"id": "Barn",
+			"min_tier": 1.0,
+			"role": "farm_building",
+			"source": "farm/Barn.fbx"
+		},
+		{
+			"footprint": 39.64,
+			"height": 33.78,
+			"id": "BigBarn",
+			"min_tier": 2.0,
+			"role": "farm_building",
+			"source": "farm/BigBarn.fbx"
+		},
+		{
+			"footprint": 30.9,
+			"height": 21.25,
+			"id": "SmallBarn",
+			"min_tier": 1.0,
+			"role": "farm_building",
+			"source": "farm/SmallBarn.fbx"
+		},
+		{
+			"footprint": 30.45,
+			"height": 20.31,
+			"id": "OpenBarn",
+			"min_tier": 1.0,
+			"role": "farm_building",
+			"source": "farm/OpenBarn.fbx"
+		},
+		{
+			"footprint": 11.86,
+			"height": 7.93,
+			"id": "ChickenCoop",
+			"min_tier": 0.0,
+			"role": "farm_building",
+			"source": "farm/ChickenCoop.fbx"
+		},
+		{
+			"footprint": 18.06,
+			"height": 38.84,
+			"id": "Silo",
+			"min_tier": 2.0,
+			"role": "farm_building",
+			"source": "farm/Silo.fbx"
+		},
+		{
+			"footprint": 26.29,
+			"height": 38.83,
+			"id": "Silo_House",
+			"min_tier": 2.0,
+			"role": "farm_building",
+			"source": "farm/Silo_House.fbx"
+		},
+		{
+			"footprint": 25.95,
+			"height": 41.62,
+			"id": "Windmill",
+			"min_tier": 2.0,
+			"role": "farm_building",
+			"source": "farm/Windmill.fbx"
+		},
+		{
+			"footprint": 24.58,
+			"height": 37.97,
+			"id": "TowerWindmill",
+			"min_tier": 3.0,
+			"role": "farm_building",
+			"source": "farm/TowerWindmill.fbx"
+		},
+		{
+			"footprint": 12.47,
+			"height": 36.1,
+			"id": "WaterTower",
+			"min_tier": 2.0,
+			"role": "farm_building",
+			"source": "farm/WaterTower.fbx"
+		},
+		{
+			"footprint": 29.01,
+			"height": 4.7,
+			"id": "FarmFence",
+			"min_tier": 0.0,
+			"role": "prop",
+			"source": "farm/Fence.fbx"
+		},
+		{
+			"footprint": 29.01,
+			"height": 5.03,
+			"id": "FarmFence2",
+			"min_tier": 0.0,
+			"role": "prop",
+			"source": "farm/Fence2.fbx"
+		},
+		{
+			"footprint": 3.73,
+			"height": 0.45,
+			"id": "Wheat_Crop",
+			"min_tier": 0.0,
+			"role": "crop",
+			"source": "crops/Wheat_Crop.fbx"
+		},
+		{
+			"footprint": 1.71,
+			"height": 0.64,
+			"id": "Corn_Crop",
+			"min_tier": 0.0,
+			"role": "crop",
+			"source": "crops/Corn_Crop.fbx"
+		},
+		{
+			"footprint": 1.18,
+			"height": 3.77,
+			"id": "Carrot_Crop",
+			"min_tier": 0.0,
+			"role": "crop",
+			"source": "crops/Carrot_Crop.fbx"
+		},
+		{
+			"footprint": 1.85,
+			"height": 1.75,
+			"id": "Lettuce_Crop",
+			"min_tier": 0.0,
+			"role": "crop",
+			"source": "crops/Lettuce_Crop.fbx"
+		},
+		{
+			"footprint": 0.88,
+			"height": 0.63,
+			"id": "Tomato_Crop",
+			"min_tier": 1.0,
+			"role": "crop",
+			"source": "crops/Tomato_Crop.fbx"
+		},
+		{
+			"footprint": 2.89,
+			"height": 2.37,
+			"id": "Pumpkin_Crop",
+			"min_tier": 1.0,
+			"role": "crop",
+			"source": "crops/Pumpkin_Crop.fbx"
+		},
+		{
+			"footprint": 1.55,
+			"height": 2.22,
+			"id": "Beet_Crop",
+			"min_tier": 0.0,
+			"role": "crop",
+			"source": "crops/Beet_Crop.fbx"
+		},
+		{
+			"footprint": 4.46,
+			"height": 0.2,
+			"id": "Rice_Crop",
+			"min_tier": 1.0,
+			"role": "crop",
+			"source": "crops/Rice_Crop.fbx"
+		}
+	],
+	"mesh_scale": 4.28261366219508
+}

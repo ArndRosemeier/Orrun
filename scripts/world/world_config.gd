@@ -219,6 +219,20 @@ extends Resource
 ## Dense grass tufts — expensive; keep to the player's immediate ring.
 @export var clutter_max_ring: int = 1
 
+# --- Fauna ----------------------------------------------------------------------------
+
+@export var fauna_enabled: bool = true
+## Hard cap on concurrent live [FaunaAgent] nodes near the player.
+@export var fauna_max_agents: int = 64
+## Metres from the player where fauna may spawn and simulate.
+@export var fauna_sim_radius: float = 220.0
+## Extra metres before a far agent is despawned (hysteresis).
+@export var fauna_despawn_hysteresis: float = 40.0
+## Coarse lattice spacing for deterministic occupancy rolls.
+@export var fauna_cell_size: float = 48.0
+## Seconds between spawn/despawn maintenance passes.
+@export var fauna_refresh_interval: float = 0.5
+
 # --- Derived ---------------------------------------------------------------------------
 
 ## Macro cells across one sector core. Exact by construction.

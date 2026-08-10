@@ -41,9 +41,10 @@ static func load_catalog(specs: Array[PropPlacer.PropSpec], catalog_path: String
 		_meshes[spec.id] = mesh
 
 
-static func load_sources(sources: Dictionary) -> void:
+static func load_sources(sources: Dictionary, extra_scale: float = 1.0) -> void:
 	## Extra id -> filename entries (e.g. ground clutter) into the same library.
 	assert(_loaded, "PropLibrary.load_catalog must run before load_sources")
+	assert(extra_scale > 0.0, "PropLibrary.load_sources extra_scale must be positive")
 	for id_variant in sources:
 		var id: StringName = id_variant
 		var path: String = LIBRARY_DIR + String(sources[id])
@@ -55,6 +56,11 @@ static func load_sources(sources: Dictionary) -> void:
 		if mesh == null:
 			_report_missing(id, path, true)
 			continue
+		if not is_equal_approx(extra_scale, 1.0):
+			var scale_xform := Transform3D(
+				Basis.IDENTITY.scaled(Vector3.ONE * extra_scale), Vector3.ZERO
+			)
+			mesh = _mesh_with_transform(mesh, scale_xform)
 		_meshes[id] = mesh
 
 
@@ -76,21 +82,48 @@ static func _report_missing(id: StringName, path: String, on_disk: bool = false)
 
 static func _first_mesh(scene: PackedScene) -> Mesh:
 	var root: Node = scene.instantiate()
-	var found: Mesh = _search_mesh(root)
+	var found: Mesh = _search_mesh(root, Transform3D.IDENTITY)
 	root.queue_free()
 	return found
 
 
-static func _search_mesh(node: Node) -> Mesh:
+static func _search_mesh(node: Node, parent_xform: Transform3D) -> Mesh:
+	## MultiMesh draws raw mesh data, so FBX node scale (Quaternius uses 100)
+	## must be baked in — returning instance.mesh alone leaves centimetre props.
+	var xform: Transform3D = parent_xform
+	if node is Node3D:
+		xform = parent_xform * (node as Node3D).transform
 	if node is MeshInstance3D:
 		var instance: MeshInstance3D = node
 		if instance.mesh != null:
-			return instance.mesh
+			return _mesh_with_transform(instance.mesh, xform)
 	for child in node.get_children():
-		var found: Mesh = _search_mesh(child)
+		var found: Mesh = _search_mesh(child, xform)
 		if found != null:
 			return found
 	return null
+
+
+static func _mesh_with_transform(mesh: Mesh, xform: Transform3D) -> Mesh:
+	if xform.is_equal_approx(Transform3D.IDENTITY):
+		return mesh
+	var out: ArrayMesh = ArrayMesh.new()
+	var normal_basis: Basis = xform.basis.inverse().transposed().orthonormalized()
+	for surface_i in mesh.get_surface_count():
+		var arrays: Array = mesh.surface_get_arrays(surface_i)
+		var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		for i in verts.size():
+			verts[i] = xform * verts[i]
+		arrays[Mesh.ARRAY_VERTEX] = verts
+		var normals_variant: Variant = arrays[Mesh.ARRAY_NORMAL]
+		if normals_variant is PackedVector3Array:
+			var normals: PackedVector3Array = normals_variant
+			for i in normals.size():
+				normals[i] = (normal_basis * normals[i]).normalized()
+			arrays[Mesh.ARRAY_NORMAL] = normals
+		out.add_surface_from_arrays(mesh.surface_get_primitive_type(surface_i), arrays)
+		out.surface_set_material(surface_i, mesh.surface_get_material(surface_i))
+	return out
 
 
 static func mesh_for(id: StringName) -> Mesh:

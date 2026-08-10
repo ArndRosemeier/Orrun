@@ -88,7 +88,12 @@ static func generate(world_context: WorldContext, sector_coord: Vector2i) -> Wor
 	)
 	var t4: int = Time.get_ticks_msec()
 	built.houses = SettlementLayout.build(
-		world_context, built.terrain, built.hydro, built.claims, built.core_rect()
+		world_context,
+		built.terrain,
+		built.hydro,
+		built.claims,
+		built.paths,
+		built.core_rect()
 	)
 	var t5: int = Time.get_ticks_msec()
 
