@@ -30,7 +30,8 @@ static func to_house_sites(
 		site.world_z = plaza_world.y + shape.center.y
 		site.yaw = shape.yaw
 		site.footprint = VillageCatalog.footprint_of(shape.catalog_id)
-		site.seat_sink = 0.2
+		# Shallow seat — deep sink + hillside bury first floors.
+		site.seat_sink = 0.06
 		out.append(site)
 	return out
 

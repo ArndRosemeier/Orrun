@@ -14,6 +14,8 @@ var config: WorldConfig
 var atlas: ContinentAtlas
 var fields: AtlasFields
 var corridors: AtlasCorridors
+## Settlement detail-damp masks: [cx, cz, radius]… (no target height).
+var settlement_pads: PackedFloat32Array = PackedFloat32Array()
 
 ## Timings of the one-off continental build, for the loading screen and HUD.
 var build_timings: Dictionary = {}
@@ -29,11 +31,14 @@ static func create(cfg: WorldConfig, continent: ContinentAtlas) -> WorldContext:
 	var t1: int = Time.get_ticks_msec()
 	context.corridors = AtlasCorridors.build(cfg, continent)
 	var t2: int = Time.get_ticks_msec()
+	context.settlement_pads = ContinentalTerrain.build_settlement_pads(continent)
+	var t3: int = Time.get_ticks_msec()
 
 	context.build_timings = {
 		"atlas_ms": continent.generate_ms,
 		"fields_ms": t1 - t0,
 		"corridors_ms": t2 - t1,
+		"settlement_pads_ms": t3 - t2,
 	}
 	return context
 
@@ -43,7 +48,7 @@ static func create(cfg: WorldConfig, continent: ContinentAtlas) -> WorldContext:
 ## Never share one: it owns a [NoiseSet], and FastNoiseLite is not safe to read
 ## from two threads at once. Building one is cheap.
 func sampler() -> ContinentalTerrain:
-	return ContinentalTerrain.create(config, fields, corridors)
+	return ContinentalTerrain.create(config, fields, corridors, settlement_pads)
 
 
 ## Key that any derived, cached artifact must be stored under. Changing the

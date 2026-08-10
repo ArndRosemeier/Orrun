@@ -116,6 +116,10 @@ impl OrrunGen {
 	) -> Dictionary<Variant, Variant> {
 		let get_i = |key: &str| -> i32 { params.get_or_nil(key).to::<i64>() as i32 };
 		let get_f = |key: &str| -> f32 { params.get_or_nil(key).to::<f32>() };
+		let settlement_pads = params
+			.get_or_nil("settlement_pads")
+			.try_to::<PackedFloat32Array>()
+			.unwrap_or_default();
 		fill_window::fill_window(
 			elevation_m,
 			humidity01,
@@ -158,6 +162,10 @@ impl OrrunGen {
 				swell_scale: get_f("swell_scale"),
 				mountain_noise_scale: get_f("mountain_noise_scale"),
 				warp_scale: get_f("warp_scale"),
+				settlement_pads,
+				settlement_detail_damp: get_f("settlement_detail_damp"),
+				settlement_core_end: get_f("settlement_core_end"),
+				settlement_pad_stride: get_i("settlement_pad_stride"),
 			},
 		)
 	}

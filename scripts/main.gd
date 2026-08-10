@@ -4,15 +4,13 @@ extends Node3D
 ## context, bake the sector the player will open in, then stream chunks.
 ##
 ## Boot lands at the last saved player position ([constant SESSION_PATH]), or at
-## [constant DEFAULT_SPAWN_XZ] on a fresh profile. Closing the window writes the
-## current continental position so the next launch resumes there.
+## the largest atlas settlement plaza on a fresh profile. Closing the window
+## writes the current continental position so the next launch resumes there.
 ##
 ## Generation runs on a worker so the window stays responsive, and the player is
 ## held frozen until there is real collision under the spawn point.
 
 const CATALOG_PATH: String = "res://assets/catalog/props.json"
-## Fresh-profile landing: densest river-mouth port plaza (continental metres).
-const DEFAULT_SPAWN_XZ: Vector2 = Vector2(173515.5, 39501.2)
 const SESSION_PATH: String = "user://player_session.cfg"
 const TERRAIN_SHADER: String = "res://shaders/terrain.gdshader"
 const WATER_SHADER: String = "res://shaders/water.gdshader"
@@ -99,13 +97,57 @@ func _bake_spawn_sector() -> void:
 		_boot_error = "Spawn is outside the atlas (%.0f, %.0f)" % [spawn_xz.x, spawn_xz.y]
 		return
 	spawn_sector = WorldSector.generate(context, sector_coord)
-	var ground: float = continental.height_at(spawn_xz.x, spawn_xz.y)
 	var saved_y: float = float(spawn["y"])
+	# Fresh profile: snap onto the flattest dry plaza in the settlement claim
+	# (atlas |∇h| is 1 km; this uses macro slope so the floodplain can win).
+	if saved_y <= -INF:
+		spawn_xz = _snap_fresh_spawn_plaza(spawn_xz)
+		sector_coord = WorldCoords.sector_of(spawn_xz.x, spawn_xz.y)
+		if sector_coord != spawn_sector.sector:
+			if not context.sector_in_atlas(sector_coord):
+				_boot_error = "Snapped spawn outside atlas (%.0f, %.0f)" % [spawn_xz.x, spawn_xz.y]
+				return
+			spawn_sector = WorldSector.generate(context, sector_coord)
+	var ground: float = continental.height_at(spawn_xz.x, spawn_xz.y)
 	_spawn_world = Vector3(
 		spawn_xz.x,
 		saved_y if saved_y > -INF else ground,
 		spawn_xz.y
 	)
+
+
+## Resolve the settlement plaza with macro |∇h| ranking (same as bake).
+func _snap_fresh_spawn_plaza(hint_xz: Vector2) -> Vector2:
+	var best_node: AtlasGraphNode = null
+	var best_d: float = INF
+	for node_variant in context.atlas.nodes:
+		var node: AtlasGraphNode = node_variant
+		if node.kind != AtlasFeatures.NodeKind.SETTLEMENT:
+			continue
+		var centre: Vector2 = context.atlas.continental_centre(node.ax, node.az)
+		var d: float = centre.distance_squared_to(hint_xz)
+		if d < best_d:
+			best_d = d
+			best_node = node
+	assert(best_node != null, "fresh spawn: no SETTLEMENT near hint")
+	var centre: Vector2 = context.atlas.continental_centre(best_node.ax, best_node.az)
+	var tier: int = VillageTier.from_atlas_node(context.atlas, best_node)
+	var area: VillageDecorator.Area = VillageDecorator.Area.new()
+	area.centre = centre
+	area.tier = tier
+	area.settlement_id = best_node.id
+	area.claim_radius = VillageTier.claim_radius(tier)
+	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
+	rng.seed = int(hash("spawn_plaza_snap:%d" % best_node.id)) & 0x7fffffff
+	var plaza: Vector2 = VillageDecorator.resolve_plaza(
+		area, spawn_sector.terrain, spawn_sector.hydro, rng
+	)
+	print(
+		"spawn plaza snap -> %.0f, %.0f (from atlas %.0f, %.0f, %s)" % [
+			plaza.x, plaza.y, centre.x, centre.y, VillageTier.name_of(tier)
+		]
+	)
+	return plaza
 
 
 func _process(_delta: float) -> void:
@@ -318,8 +360,14 @@ func _resolve_spawn() -> Dictionary:
 				"y": float(cfg.get_value("player", "world_y", -INF)),
 				"yaw": float(cfg.get_value("player", "yaw", 0.0)),
 			}
-		push_warning("Saved spawn outside atlas; using default ocean mouth")
-	return {"xz": DEFAULT_SPAWN_XZ, "y": -INF, "yaw": 0.0}
+		push_warning("Saved spawn outside atlas; using largest settlement")
+	var plaza: Vector2 = SettlementLayout.spawn_plaza_largest(context.atlas)
+	print(
+		"fresh spawn -> largest settlement plaza %.0f, %.0f (sector %s)" % [
+			plaza.x, plaza.y, WorldCoords.sector_of(plaza.x, plaza.y)
+		]
+	)
+	return {"xz": plaza, "y": -INF, "yaw": 0.0}
 
 
 func _save_session() -> void:

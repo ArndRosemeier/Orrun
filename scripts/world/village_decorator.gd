@@ -10,6 +10,10 @@ const WATER_CLEARANCE: float = 4.0
 const RELIEF_PER_METRE: float = 0.14
 const MIN_PAD_RELIEF: float = 1.25
 const MAX_PAD_SLOPE: float = 0.32
+## Macro |∇h| taps for plaza ranking (metres).
+const PLAZA_SLOPE_EPS: float = 28.0
+## Reference rise/run for plaza flatness fitness (~2.3°).
+const PLAZA_SLOPE_REF: float = 0.04
 
 
 class Area extends RefCounted:
@@ -48,23 +52,17 @@ static func decorate(
 	return village_only
 
 
-## Pick a dry plaza stand for this settlement area.
+## Pick the flattest dry plaza stand inside the claim (macro |∇h| primary).
 static func resolve_plaza(
 	area: Area, terrain: MacroTerrain, hydro: Hydrology, rng: RandomNumberGenerator
 ) -> Vector2:
-	if _point_dry(area.centre.x, area.centre.y, 6.0, terrain, hydro, 64.0):
-		if area.tier < VillageTier.Tier.TOWN:
-			return area.centre
-	var plaza: Vector2 = _inland_plaza(
-		area.centre, area.claim_radius * 0.55, terrain, hydro, rng
+	return _best_flat_plaza(
+		area.centre, area.claim_radius * 0.9, terrain, hydro, rng
 	)
-	if plaza != area.centre:
-		return plaza
-	return _inland_plaza(area.centre, area.claim_radius * 0.9, terrain, hydro, rng)
 
 
-## Prefer dry ground inland from a wet settlement centre.
-static func _inland_plaza(
+## Search the claim for argmax flatness among dry pads. Near-pin is a tie-break.
+static func _best_flat_plaza(
 	centre: Vector2,
 	search_r: float,
 	terrain: MacroTerrain,
@@ -74,41 +72,69 @@ static func _inland_plaza(
 	var best: Vector2 = centre
 	var best_score: float = -INF
 	var radius: float = maxf(search_r, 48.0)
-	for _i in 64:
+	# Score the atlas pin if dry so hamlets can stay put when already best.
+	if _point_dry(centre.x, centre.y, 5.0, terrain, hydro, 96.0):
+		best_score = _plaza_score(centre, centre, radius, terrain, hydro)
+		best = centre
+	for _i in 96:
 		var ang: float = rng.randf() * TAU
-		var dist: float = rng.randf_range(radius * 0.2, radius)
+		var dist: float = rng.randf_range(radius * 0.08, radius)
 		var p: Vector2 = centre + Vector2(cos(ang), sin(ang)) * dist
 		if not _point_dry(p.x, p.y, 5.0, terrain, hydro, 96.0):
 			continue
-		var score: float = _plaza_score(p, terrain, hydro)
+		var score: float = _plaza_score(p, centre, radius, terrain, hydro)
 		if score > best_score:
 			best_score = score
 			best = p
-	if best_score == -INF:
-		var step: float = 16.0
-		var n: int = int(ceil(radius / step))
-		for gz in range(-n, n + 1):
-			for gx in range(-n, n + 1):
-				var p: Vector2 = centre + Vector2(float(gx), float(gz)) * step
-				if p.distance_to(centre) > radius:
-					continue
-				if not _point_dry(p.x, p.y, 5.0, terrain, hydro, 96.0):
-					continue
-				var score: float = _plaza_score(p, terrain, hydro)
-				if score > best_score:
-					best_score = score
-					best = p
+	var step: float = 20.0
+	var n: int = int(ceil(radius / step))
+	for gz in range(-n, n + 1):
+		for gx in range(-n, n + 1):
+			var p: Vector2 = centre + Vector2(float(gx), float(gz)) * step
+			if p.distance_to(centre) > radius:
+				continue
+			if not _point_dry(p.x, p.y, 5.0, terrain, hydro, 96.0):
+				continue
+			var score: float = _plaza_score(p, centre, radius, terrain, hydro)
+			if score > best_score:
+				best_score = score
+				best = p
+	assert(best_score > -INF, "VillageDecorator: no dry plaza in claim")
 	return best
 
 
-static func _plaza_score(p: Vector2, terrain: MacroTerrain, hydro: Hydrology) -> float:
+static func _macro_slope(p: Vector2, terrain: MacroTerrain) -> float:
+	var eps: float = PLAZA_SLOPE_EPS
 	var h: float = terrain.height_at(p.x, p.y)
+	var hx: float = terrain.height_at(p.x + eps, p.y)
+	var hz: float = terrain.height_at(p.x, p.y + eps)
+	var gx: float = (hx - h) / eps
+	var gz: float = (hz - h) / eps
+	return sqrt(gx * gx + gz * gz)
+
+
+static func _plaza_flatness(p: Vector2, terrain: MacroTerrain) -> float:
+	var s: float = _macro_slope(p, terrain)
+	var t: float = s / PLAZA_SLOPE_REF
+	return 1.0 / (1.0 + t * t)
+
+
+static func _plaza_score(
+	p: Vector2,
+	centre: Vector2,
+	search_r: float,
+	terrain: MacroTerrain,
+	hydro: Hydrology
+) -> float:
+	var flat: float = _plaza_flatness(p, terrain)
 	var reach: Dictionary = hydro.nearest_reach(p.x, p.y, 120.0)
 	var wet_gap: float = 40.0
 	if not reach.is_empty():
 		wet_gap = maxf(float(reach["distance"]) - float(reach["half_width"]), 0.0)
 	var lake_gap: float = hydro.lake_distance_at(p.x, p.y)
-	return h + wet_gap * 0.35 + minf(lake_gap, 80.0) * 0.15
+	var near: float = 1.0 - clampf(p.distance_to(centre) / maxf(search_r, 1.0), 0.0, 1.0)
+	# Flatness dominates; dryness margins next; near-pin is only a small tie-break.
+	return flat * 100.0 + wet_gap * 0.25 + minf(lake_gap, 80.0) * 0.12 + near * 8.0
 
 
 static func _footprint_buildable(

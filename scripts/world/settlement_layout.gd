@@ -16,7 +16,25 @@ static func footprint_of(catalog_id: StringName) -> float:
 		return VillageCatalog.footprint_of(catalog_id)
 	if FarmCatalog.has_id(catalog_id):
 		return FarmCatalog.footprint_of(catalog_id)
-	return 6.0
+	assert(false, "SettlementLayout.footprint_of: unknown id %s" % String(catalog_id))
+	return 0.0
+
+
+## Oriented local XZ metres for collision (door along ±Z). Village dwellings/civics
+## use measured size_*; farm buildings use square footprint until measured.
+static func collision_xz_of(catalog_id: StringName) -> Vector2:
+	if VillageCatalog.has_id(catalog_id):
+		var spec: VillageCatalog.Spec = VillageCatalog.spec_for(catalog_id)
+		assert(
+			spec.has_oriented_size(),
+			"SettlementLayout.collision_xz_of: %s missing size_x/size_z" % String(catalog_id)
+		)
+		return Vector2(spec.size_x, spec.size_z)
+	if FarmCatalog.has_id(catalog_id):
+		var fp: float = FarmCatalog.footprint_of(catalog_id)
+		return Vector2(fp, fp)
+	assert(false, "SettlementLayout.collision_xz_of: unknown id %s" % String(catalog_id))
+	return Vector2.ZERO
 
 
 static func height_of(catalog_id: StringName) -> float:
@@ -24,7 +42,8 @@ static func height_of(catalog_id: StringName) -> float:
 		return VillageCatalog.height_of(catalog_id)
 	if FarmCatalog.has_id(catalog_id):
 		return FarmCatalog.height_of(catalog_id)
-	return 4.5
+	assert(false, "SettlementLayout.height_of: unknown id %s" % String(catalog_id))
+	return 0.0
 
 
 ## Plaza stand point near the settlement closest to `hint_xz` (continental metres).
@@ -40,10 +59,36 @@ static func spawn_plaza_near(atlas: ContinentAtlas, hint_xz: Vector2) -> Vector2
 		if d < best_d:
 			best_d = d
 			best_node = node
-	if best_node == null:
-		return hint_xz
-	var centre: Vector2 = atlas.continental_centre(best_node.ax, best_node.az)
-	var tier: int = VillageTier.from_atlas_node(atlas, best_node)
+	assert(best_node != null, "SettlementLayout.spawn_plaza_near: no SETTLEMENT nodes")
+	return _plaza_stand(atlas, best_node)
+
+
+## Plaza stand at the largest settlement: PORT > TOWN > VILLAGE > HAMLET, then pop.
+static func spawn_plaza_largest(atlas: ContinentAtlas) -> Vector2:
+	var best_node: AtlasGraphNode = null
+	var best_tier: int = -1
+	var best_pop: int = -1
+	for node_variant in atlas.nodes:
+		var node: AtlasGraphNode = node_variant
+		if node.kind != AtlasFeatures.NodeKind.SETTLEMENT:
+			continue
+		var tier: int = VillageTier.from_atlas_node(atlas, node)
+		var pop: int = AtlasPack.population(atlas.cell_at(node.ax, node.az))
+		if tier > best_tier or (tier == best_tier and pop > best_pop):
+			best_tier = tier
+			best_pop = pop
+			best_node = node
+		elif tier == best_tier and pop == best_pop and best_node != null:
+			# Stable tie-break: lower atlas cell index wins.
+			if node.cell < best_node.cell:
+				best_node = node
+	assert(best_node != null, "SettlementLayout.spawn_plaza_largest: no SETTLEMENT nodes")
+	return _plaza_stand(atlas, best_node)
+
+
+static func _plaza_stand(atlas: ContinentAtlas, node: AtlasGraphNode) -> Vector2:
+	var centre: Vector2 = atlas.continental_centre(node.ax, node.az)
+	var tier: int = VillageTier.from_atlas_node(atlas, node)
 	var stand: float = VillageTier.plaza_radius(tier) * 0.65
 	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
 	rng.seed = int(hash("spawn_plaza:%.0f:%.0f" % [centre.x, centre.y])) & 0x7fffffff

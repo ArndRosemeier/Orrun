@@ -196,10 +196,14 @@ func _build_props(job: ChunkJob) -> void:
 
 
 func _add_house_collision(catalog_id: StringName, transforms: Array) -> void:
-	var footprint: float = SettlementLayout.footprint_of(catalog_id)
+	## Oriented box from catalog size_x/size_z (yawed with the instance).
+	## Mesh AABBs include eaves/beams; lab packs flush to that AABB, so a full-size
+	## collider walls off alleys. Shrink to the masonry body.
+	const BODY_SCALE: float = 0.78
+	var xz: Vector2 = SettlementLayout.collision_xz_of(catalog_id)
 	var height: float = SettlementLayout.height_of(catalog_id)
 	var box: BoxShape3D = BoxShape3D.new()
-	box.size = Vector3(footprint * 0.85, height, footprint * 0.85)
+	box.size = Vector3(xz.x * BODY_SCALE, height, xz.y * BODY_SCALE)
 	for xform_variant in transforms:
 		var xform: Transform3D = xform_variant
 		var body: StaticBody3D = StaticBody3D.new()

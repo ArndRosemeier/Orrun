@@ -759,6 +759,17 @@ func _add_crossing(
 				road.crossings.append(existing)
 			return
 
+	var use_axis: Vector2 = axis.normalized() if axis.length_squared() > 0.0001 else Vector2.RIGHT
+	var pos_a: Vector2 = centre - use_axis * span_half
+	var pos_b: Vector2 = centre + use_axis * span_half
+	var bank_a: float = terrain.height_at(pos_a.x, pos_a.y)
+	var bank_b: float = terrain.height_at(pos_b.x, pos_b.y)
+	var bank_mid: float = terrain.height_at(centre.x, centre.y)
+	# Phantom trunk cells / dry gutters: no water below the banks → no kit.
+	var wet_clearance: float = minf(bank_a, bank_b) - water_z
+	if not over_lake and wet_clearance < 0.35:
+		return
+
 	var site: BridgeSite = BridgeSite.new()
 	site.id = bridges.size()
 	site.road_id = road.id
@@ -770,17 +781,13 @@ func _add_crossing(
 		and channel_half * 2.0 <= config.ford_max_width
 	)
 
-	var use_axis: Vector2 = axis.normalized() if axis.length_squared() > 0.0001 else Vector2.RIGHT
-	var pos_a: Vector2 = centre - use_axis * span_half
-	var pos_b: Vector2 = centre + use_axis * span_half
-	# Deck is one height for both banks; density hard-sets abutments to it after
-	# village terracing. Prefer the higher bank so we fill the low side up.
-	var bank_a: float = terrain.height_at(pos_a.x, pos_a.y)
-	var bank_b: float = terrain.height_at(pos_b.x, pos_b.y)
+	# Deck is one height for both banks; density hard-sets abutments to it.
+	# Prefer the higher bank so we fill the low side up.
 	var deck_z: float = (
 		water_z - 0.2 if site.is_ford
 		else maxf(maxf(bank_a, bank_b), water_z + BRIDGE_CLEARANCE)
 	)
+	deck_z = maxf(deck_z, bank_mid)
 	site.deck_z = deck_z
 	site.axis = use_axis
 	site.center_xz = centre

@@ -5,15 +5,17 @@ extends RefCounted
 ## The shape is assembled in a strict order, and that order is the whole design:
 ##
 ##   1. macro height              - the drainage surface everything agrees on
+##                                  (settlement detail damp softens relief_amp)
 ##   2. hydro and road carves     - valleys, beds, banks, benched roadways
-##   3. settlement terraces       - soft village pads
-##   4. water-over-ground seal    - suppress land bridges over the sheet
-##   5. axial bridge grades LAST  - hard abutment set to BridgeSite.deck_z
-##   6. relief (masked) + caves   - 3D detail never undoes the water/bridge contract
+##   3. water-over-ground seal    - suppress land bridges over the sheet
+##   4. axial bridge grades LAST  - hard abutment set to BridgeSite.deck_z
+##   5. relief (masked) + caves   - 3D detail never undoes the water/bridge contract
 ##
-## Bridge grades run after village pads so a plaza cannot pull an abutment off
-## deck_z. Relief is multiplied by a corridor mask so 3D detail cannot lift the
-## ground through a river or drop it away from a road.
+## Settlement flattening lives in ContinentalTerrain (atlas node basins), not
+## here — density-field plaza terraces fought roads and hydro. Bridge grades
+## still run last so abutments own deck_z. Relief is multiplied by a corridor
+## mask so 3D detail cannot lift the ground through a river or drop it away
+## from a road.
 
 const TILE_DIVISIONS: int = 4
 ## Metres the ground stands above the water at the lip of a channel.
@@ -151,8 +153,6 @@ static func build(
 	var rivers: PackedFloat32Array = sector.collect_river_segments(query_rect)
 	var roads: PackedFloat32Array = sector.collect_road_segments(query_rect)
 	var fords: PackedVector3Array = _collect_fords(sector, query_rect)
-	## Settlement terraces only — bridge approaches are axial grades applied last.
-	var grade_pads: PackedVector4Array = _collect_settlement_pads(sector, query_rect)
 	var bridge_grades: PackedFloat32Array = _collect_bridge_grades(sector, query_rect)
 
 	var tile_span: float = (cfg.chunk_size + field.voxel * 2.0) / float(TILE_DIVISIONS)
@@ -165,8 +165,7 @@ static func build(
 
 	_build_columns(
 		cfg, sector, continental, noise, field, samples_h, origin_x, origin_z,
-		rivers, roads, river_tiles, road_tiles, tile_span, fords, bridge_grades,
-		grade_pads
+		rivers, roads, river_tiles, road_tiles, tile_span, fords, bridge_grades
 	)
 	_build_volume(cfg, noise, field, samples_h, origin_x, origin_z)
 	return field
@@ -196,8 +195,7 @@ static func _build_columns(
 	road_tiles: Array[PackedInt32Array],
 	tile_span: float,
 	fords: PackedVector3Array,
-	bridge_grades: PackedFloat32Array,
-	grade_pads: PackedVector4Array
+	bridge_grades: PackedFloat32Array
 ) -> void:
 	var count: int = samples_h * samples_h
 	field.has_water = false
@@ -498,6 +496,8 @@ static func _build_columns(
 				submerged_z = atlas_surface
 				wet = maxf(wet, smoothstep(0.0, 2.5, atlas_surface - height))
 
+			var gap: float = _axial_bridge_gap(bridge_grades, wx, wz)
+
 			# --- carve: road bench ---------------------------------------------------
 			# Roads both cut and fill, which is the one carve that can raise the
 			# ground. It is clamped below any water surface here so an approach
@@ -505,7 +505,6 @@ static func _build_columns(
 			# Deep hillside cuts used a fixed ~14 m shoulder, so surface-nets
 			# meshed a near-vertical cliff on the uphill lip. Widen the batter
 			# with cut depth so the same drop spreads laterally.
-			var gap: float = _axial_bridge_gap(bridge_grades, wx, wz)
 			var roadness: float = 0.0
 			var cut_depth: float = maxf(surface - road_z, 0.0)
 			var shoulder: float = 14.0
@@ -530,21 +529,6 @@ static func _build_columns(
 				# to the abutment. Cutting the dirt too leaves a bridge sitting
 				# in untouched grass with no road arriving at it.
 				roadness = 1.0 - smoothstep(road_half * 0.6, road_half + 1.6, road_d)
-
-			# --- settlement terraces (before bridge grades) -------------------------
-			# Soft cut/fill toward plaza height on dry ground only. Never touch
-			# wet columns (clamping pad_z to the waterline and lerping used to
-			# lift river beds into a sheet gap) and fade out across the hydro
-			# corridor so banks/valleys keep their carve. Roads still cross the
-			# village; only distance-to-water gates the pad.
-			var pad: Vector2 = _grade_pad(grade_pads, wx, wz)
-			if pad.y > 0.001 and water_top == -INF:
-				var hydro_w: float = smoothstep(
-					cfg.corridor_inner, cfg.corridor_outer, nearest_wet
-				)
-				var pad_w: float = pad.y * (1.0 - gap) * hydro_w
-				if pad_w > 0.001:
-					surface = lerpf(surface, pad.x, pad_w)
 
 			var error: float = 0.0
 			if water_top > -INF:
@@ -751,28 +735,9 @@ static func _axial_bridge_gap(grades: PackedFloat32Array, wx: float, wz: float) 
 	return clampf(gap, 0.0, 1.0)
 
 
-## Strongest settlement grade pad at a point: (target_z, strength 0..1).
-static func _grade_pad(pads: PackedVector4Array, wx: float, wz: float) -> Vector2:
-	var best_z: float = 0.0
-	var best_w: float = 0.0
-	for p in pads:
-		var radius: float = p.z
-		if radius <= 0.0:
-			continue
-		var d: float = Vector2(wx - p.x, wz - p.y).length() / radius
-		if d >= 1.0:
-			continue
-		# Wide flat core, soft skirt — houses need a real terrace, not a dome.
-		var w: float = 1.0 - smoothstep(0.58, 1.0, d)
-		if w > best_w:
-			best_w = w
-			best_z = p.w
-	return Vector2(best_z, best_w)
-
-
 ## Last writer: hard apron at deck_z, then an eased inland ramp. Runs after
-## settlement pads and the water-over-ground seal. Bank columns marked wet by
-## the seal still get the apron — skipping them left entry steps and exit hills.
+## the water-over-ground seal. Bank columns marked wet by the seal still get
+## the apron — skipping them left entry steps and exit hills.
 static func _apply_bridge_grades(
 	field: Field,
 	grades: PackedFloat32Array,
@@ -917,22 +882,6 @@ static func _collect_bridge_grades(sector: WorldSector, rect: Rect2) -> PackedFl
 		out.append(site.ramp_length)
 		out.append(site.grade_half_width)
 		out.append(site.plateau_length)
-	return out
-
-
-static func _collect_settlement_pads(sector: WorldSector, rect: Rect2) -> PackedVector4Array:
-	var out: PackedVector4Array = PackedVector4Array()
-	for claim in sector.claims.claims_in_rect(rect.grow(8.0)):
-		if claim.kind == &"settlement":
-			out.append(Vector4(claim.center.x, claim.center.y, claim.radius, claim.ground_z))
-	# Tight pads under each house so the slab sits on flat grade, not a hillside.
-	for site in sector.houses:
-		var r: float = site.footprint * 0.75 + 4.0
-		var p: Vector2 = Vector2(site.world_x, site.world_z)
-		if not rect.grow(r).has_point(p):
-			continue
-		var z: float = sector.terrain.height_at(site.world_x, site.world_z)
-		out.append(Vector4(p.x, p.y, r, z))
 	return out
 
 

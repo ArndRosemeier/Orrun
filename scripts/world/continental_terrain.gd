@@ -12,14 +12,13 @@ extends RefCounted
 ##
 ##   1. atlas elevation, read with a smooth kernel     (continental authority)
 ##   2. warped detail noise, scaled by atlas relief    (what a kilometre hides)
-##   3. trunk valleys along atlas river corridors      (so the land drains)
-##   4. shoreline authority against the water plane    (so coasts are coasts)
+##   3. settlement detail damp near SETTLEMENT nodes   (softer inner-cell relief)
+##   4. trunk valleys along atlas river corridors      (so the land drains)
+##   5. shoreline authority against the water plane    (so coasts are coasts)
 ##
-## Step 4 is the global signed shoreline function. Land and water meet exactly
-## where [method shore_signed] crosses zero, and both the depth below and the
-## freeboard above fade to zero there, so the waterline is continuous rather
-## than a step. Because that function depends only on the atlas and continental
-## coordinates, every sector draws the same coast.
+## Step 3 only scales swell/ridge and density relief_amp — it does not pull
+## height toward a target or neighbourhood mean. Same metres → same weight, so
+## seams stay continuous.
 ##
 ## One instance per thread: it owns a [NoiseSet], which is not shareable.
 
@@ -37,6 +36,13 @@ const FREEBOARD_SPAN: float = 26.0
 ## corridor mask how near a coast a column is, so an approximation is honest:
 ## the waterline itself is the exact zero of the signed function, not this.
 const SHORE_METRES_PER_UNIT: float = 500.0
+## Packed [cx, cz, radius]… for settlement detail damp (no target height).
+const SETTLEMENT_PAD_STRIDE: int = 3
+## How hard settlement weight turns down swell/ridge and density relief_amp.
+const SETTLEMENT_DETAIL_DAMP: float = 0.85
+## Inner fraction of damp radius at full weight.
+const SETTLEMENT_CORE_END: float = 0.55
+const SETTLEMENT_DAMP_RADIUS_MAX: float = 360.0
 ## Horizontal bins used when a whole window is filled at once. Only an
 ## optimisation: a bin holds every corridor that could reach any cell in it, and
 ## corridors that turn out to be too far away are skipped per cell, so the
@@ -45,20 +51,44 @@ var config: WorldConfig
 var fields: AtlasFields
 var corridors: AtlasCorridors
 var noise: NoiseSet
+## Packed [cx, cz, radius]… from atlas SETTLEMENT nodes.
+var settlement_pads: PackedFloat32Array = PackedFloat32Array()
 
 var _continent_span: float = 1.0
 
 
 static func create(
-	cfg: WorldConfig, atlas_fields: AtlasFields, atlas_corridors: AtlasCorridors
+	cfg: WorldConfig,
+	atlas_fields: AtlasFields,
+	atlas_corridors: AtlasCorridors,
+	pads: PackedFloat32Array = PackedFloat32Array()
 ) -> ContinentalTerrain:
 	var terrain: ContinentalTerrain = ContinentalTerrain.new()
 	terrain.config = cfg
 	terrain.fields = atlas_fields
 	terrain.corridors = atlas_corridors
 	terrain.noise = NoiseSet.create(cfg)
+	terrain.settlement_pads = pads
 	terrain._continent_span = maxf(cfg.continent_metres(), 1.0)
 	return terrain
+
+
+## Influence masks only — centre + radius. No target Z (not a basin).
+static func build_settlement_pads(atlas: ContinentAtlas) -> PackedFloat32Array:
+	var out: PackedFloat32Array = PackedFloat32Array()
+	for node_variant in atlas.nodes:
+		var node: AtlasGraphNode = node_variant
+		if node.kind != AtlasFeatures.NodeKind.SETTLEMENT:
+			continue
+		var centre: Vector2 = atlas.continental_centre(node.ax, node.az)
+		var tier: int = VillageTier.from_atlas_node(atlas, node)
+		var radius: float = minf(
+			VillageTier.built_radius(tier) * 0.72, SETTLEMENT_DAMP_RADIUS_MAX
+		)
+		out.append(centre.x)
+		out.append(centre.y)
+		out.append(radius)
+	return out
 
 
 # --- Single-sample reads --------------------------------------------------------
@@ -76,7 +106,8 @@ func height_at(world_x: float, world_z: float) -> float:
 
 
 func relief_amp_at(world_x: float, world_z: float) -> float:
-	return _relief_amp(fields.sample_smooth(fields.relief01, world_x, world_z))
+	var amp: float = _relief_amp(fields.sample_smooth(fields.relief01, world_x, world_z))
+	return amp * _detail_scale(world_x, world_z)
 
 
 func moisture_at(world_x: float, world_z: float) -> float:
@@ -181,6 +212,10 @@ func fill_window(
 		"swell_scale": config.swell_scale,
 		"mountain_noise_scale": config.mountain_noise_scale,
 		"warp_scale": config.warp_scale,
+		"settlement_pads": settlement_pads,
+		"settlement_detail_damp": SETTLEMENT_DETAIL_DAMP,
+		"settlement_core_end": SETTLEMENT_CORE_END,
+		"settlement_pad_stride": SETTLEMENT_PAD_STRIDE,
 	}
 	var result: Variant = native.call(
 		"fill_window",
@@ -203,6 +238,13 @@ func fill_window(
 	var moist_src: PackedFloat32Array = dict["moisture"]
 	var temp_src: PackedFloat32Array = dict["temperature"]
 	var count: int = cells * cells
+	assert(
+		elev_src.size() == count
+		and rel_src.size() == count
+		and moist_src.size() == count
+		and temp_src.size() == count,
+		"OrrunGen.fill_window size mismatch"
+	)
 	for i in count:
 		elevation[i] = elev_src[i]
 		relief_amp[i] = rel_src[i]
@@ -234,7 +276,7 @@ func _base_height(world_x: float, world_z: float) -> float:
 	# Linear relief (not squared): squared made Peak height feel broken in alpine.
 	var ridge: float = (shaped - 0.35) * config.mountain_detail * lerpf(0.35, 1.0, relief)
 
-	return base + (swell + ridge) * dryness
+	return base + (swell + ridge) * dryness * _detail_scale(world_x, world_z)
 
 
 ## Amplifies atlas elevation against a local neighbourhood so orogen flanks
@@ -300,7 +342,7 @@ func _carve_valleys(
 			config.mountain_detail * lerpf(0.35, 1.0, relief01) * 0.65
 			+ config.swell_height * lerpf(1.0, 0.4, relief01) * 0.35
 			+ contrast_gutter
-		)
+		) * _detail_scale(world_x, world_z)
 		var min_gutter: float = config.trunk_bank_rise + detail_amp
 		var atlas_floor: float = ay + (by - ay) * t + config.trunk_bank_rise
 		var floor_z: float = minf(atlas_floor, height - min_gutter)
@@ -349,6 +391,28 @@ func _relief_amp(relief01: float) -> float:
 		smoothstep(0.12, 0.55, relief01)
 	)
 	return lerpf(amp, config.relief_amp_mountains, smoothstep(0.55, 0.92, relief01))
+
+
+## Soften swell/ridge and density relief near settlements (not a height plate).
+func _detail_scale(world_x: float, world_z: float) -> float:
+	return 1.0 - _settlement_weight(world_x, world_z) * SETTLEMENT_DETAIL_DAMP
+
+
+func _settlement_weight(world_x: float, world_z: float) -> float:
+	var best: float = 0.0
+	var i: int = 0
+	while i + SETTLEMENT_PAD_STRIDE <= settlement_pads.size():
+		var cx: float = settlement_pads[i]
+		var cz: float = settlement_pads[i + 1]
+		var radius: float = settlement_pads[i + 2]
+		i += SETTLEMENT_PAD_STRIDE
+		if radius <= 1.0:
+			continue
+		var d: float = Vector2(world_x - cx, world_z - cz).length() / radius
+		if d >= 1.0:
+			continue
+		best = maxf(best, 1.0 - smoothstep(SETTLEMENT_CORE_END, 1.0, d))
+	return best
 
 
 func _moisture(world_x: float, world_z: float) -> float:

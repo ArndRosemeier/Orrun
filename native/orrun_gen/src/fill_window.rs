@@ -46,6 +46,10 @@ pub struct FillParams {
 	pub swell_scale: f32,
 	pub mountain_noise_scale: f32,
 	pub warp_scale: f32,
+	pub settlement_pads: PackedFloat32Array,
+	pub settlement_detail_damp: f32,
+	pub settlement_core_end: f32,
+	pub settlement_pad_stride: i32,
 }
 
 fn clamp_octaves(n: i32) -> i32 {
@@ -99,6 +103,14 @@ pub fn fill_window(
 			let index = cz * cells + cx;
 			let bin = &bins[(bz * BIN_DIVISIONS + bx) as usize];
 
+			let detail_scale = settlement_detail_scale(
+				wx,
+				wz,
+				&p.settlement_pads,
+				p.settlement_pad_stride,
+				p.settlement_core_end,
+				p.settlement_detail_damp,
+			);
 			let mut height = base_height(
 				wx,
 				wz,
@@ -115,6 +127,7 @@ pub fn fill_window(
 				p.mountain_detail,
 				p.mountain_sharpness,
 				p.mountain_macro_contrast,
+				detail_scale,
 			);
 			height = carve_valleys(
 				height,
@@ -131,6 +144,7 @@ pub fn fill_window(
 				p.swell_height,
 				p.mountain_macro_contrast,
 				p.sea_surface_z,
+				detail_scale,
 			);
 			height = shore_authority(
 				height,
@@ -152,7 +166,7 @@ pub fn fill_window(
 				p.relief_amp_plains,
 				p.relief_amp_hills,
 				p.relief_amp_mountains,
-			);
+			) * detail_scale;
 			moisture[index] = moisture_of(wx, wz, &humidity01, p.atlas_size, &moisture_n);
 			temperature[index] =
 				temperature_for(wx, wz, height, p.continent_span, &temperature_n);
@@ -205,6 +219,39 @@ fn bin_rivers(
 	bins
 }
 
+fn settlement_detail_scale(
+	world_x: f32,
+	world_z: f32,
+	pads: &PackedFloat32Array,
+	stride: i32,
+	core_end: f32,
+	detail_damp: f32,
+) -> f32 {
+	let stride = stride.max(3) as usize;
+	let mut best = 0.0f32;
+	let mut i = 0usize;
+	while i + stride <= pads.len() {
+		let cx = pads[i];
+		let cz = pads[i + 1];
+		let radius = pads[i + 2];
+		i += stride;
+		if radius <= 1.0 {
+			continue;
+		}
+		let dx = world_x - cx;
+		let dz = world_z - cz;
+		let d = (dx * dx + dz * dz).sqrt() / radius;
+		if d >= 1.0 {
+			continue;
+		}
+		let w = 1.0 - smoothstep(core_end, 1.0, d);
+		if w > best {
+			best = w;
+		}
+	}
+	1.0 - best * detail_damp
+}
+
 fn base_height(
 	world_x: f32,
 	world_z: f32,
@@ -221,6 +268,7 @@ fn base_height(
 	mountain_detail: f32,
 	mountain_sharpness: f32,
 	mountain_macro_contrast: f32,
+	detail_scale: f32,
 ) -> f32 {
 	let warp_x = warp_a.get(world_x, world_z) * warp_strength;
 	let warp_z = warp_b.get(world_x, world_z) * warp_strength;
@@ -243,7 +291,7 @@ fn base_height(
 	let ridge01 = (mountain.get(px * 0.9, pz * 0.9) * 0.5 + 0.5).clamp(0.0, 1.0);
 	let shaped = ridge01.powf(mountain_sharpness.max(0.5));
 	let ridge = (shaped - 0.35) * mountain_detail * lerp(0.35, 1.0, relief);
-	base + (swell_v + ridge) * dryness
+	base + (swell_v + ridge) * dryness * detail_scale
 }
 
 fn atlas_base_steepened(
@@ -284,13 +332,15 @@ fn carve_valleys(
 	swell_height: f32,
 	mountain_macro_contrast: f32,
 	sea_surface_z: f32,
+	detail_scale: f32,
 ) -> f32 {
 	let mut out = height;
 	let relief = fields::sample_smooth(relief01, atlas_size, world_x, world_z);
 	let contrast_gutter = ((mountain_macro_contrast - 1.0).max(0.0) * 18.0 * relief).min(22.0);
-	let detail_amp = mountain_detail * lerp(0.35, 1.0, relief) * 0.65
+	let detail_amp = (mountain_detail * lerp(0.35, 1.0, relief) * 0.65
 		+ swell_height * lerp(1.0, 0.4, relief) * 0.35
-		+ contrast_gutter;
+		+ contrast_gutter)
+		* detail_scale;
 	let min_gutter = trunk_bank_rise + detail_amp;
 	for &base_i in bases {
 		let base = base_i as usize;

@@ -45,8 +45,9 @@ func _process(_delta: float) -> void:
 
 	var lines: PackedStringArray = PackedStringArray([
 		"Orrun  %.0f FPS" % Engine.get_frames_per_second(),
-		"continental %.0f, %.0f, %.0f   origin offset %.0f, %.0f" % [
+		"continental %.0f, %.0f, %.0f   yaw %.3f rad (%.0f deg)   origin offset %.0f, %.0f" % [
 			world_pos.x, world_pos.y, world_pos.z,
+			player.rotation.y, rad_to_deg(player.rotation.y),
 			WorldOrigin.offset.x, WorldOrigin.offset.z
 		],
 		"sector %d,%d   chunk %d,%d   %d live, %d pages, queue %d" % [

@@ -23,6 +23,12 @@ const POPULATION_SCORE_SPAN: float = 1.0
 const POPULATION_MOUTH_RADIUS: int = 2
 ## Population at or above this promotes a node to SETTLEMENT.
 const SETTLEMENT_MIN_POP: int = 7
+## Reference |∇h| (rise/run) for flatness fitness — ~2% / 1.1°.
+const SETTLEMENT_SLOPE_REF: float = 0.02
+## Hard cliff reject: steeper than this cannot host a SETTLEMENT.
+const SETTLEMENT_SLOPE_CLIFF: float = 0.12
+## Minimum flatness fitness for a townable peak.
+const SETTLEMENT_FLATNESS_FLOOR: float = 0.35
 
 static var NEIGHBOR_DX: PackedInt32Array = PackedInt32Array([1, 1, 0, -1, -1, -1, 0, 1])
 static var NEIGHBOR_DZ: PackedInt32Array = PackedInt32Array([0, 1, 1, 1, 0, -1, -1, -1])
@@ -1393,6 +1399,8 @@ func _population_score(
 	var humidity: float = float(AtlasPack.humidity(packed)) / 255.0
 	var relief: float = float(AtlasPack.relief(packed)) / 63.0
 	var elevation: int = AtlasPack.elevation(packed)
+	var flatness: float = _flatness_fitness(ax, az)
+	var slope: float = _local_slope(ax, az)
 
 	var score: float = smoothstep(0.28, 0.78, humidity) * 0.5
 	score -= relief * 0.65
@@ -1426,7 +1434,62 @@ func _population_score(
 	# Regional bias keeps occupancy clustered; grain breaks ties inside a region.
 	score += region.get_noise_2d(float(ax), float(az)) * 0.22
 	score += grain.get_noise_2d(float(ax), float(az)) * 0.14
+	# |∇h| fitness multiplies last so mouth/river bonuses cannot crown a steep bank
+	# when a flatter neighbour scores higher.
+	score *= lerpf(0.05, 1.0, flatness)
+	if slope > SETTLEMENT_SLOPE_CLIFF:
+		score *= 0.05
 	return score
+
+
+## Land elevation in metres, or NAN when out of bounds / not land.
+func _land_elev_m(ax: int, az: int) -> float:
+	if not in_bounds(ax, az):
+		return NAN
+	var packed: int = cells[index_of(ax, az)]
+	if not AtlasBiomes.is_land(AtlasPack.biome(packed)):
+		return NAN
+	return float(AtlasPack.elevation_to_metres(AtlasPack.elevation(packed)))
+
+
+## First-derivative magnitude |∇h| (rise/run) from atlas neighbour metres.
+func _local_slope(ax: int, az: int) -> float:
+	var h0: float = _land_elev_m(ax, az)
+	if is_nan(h0):
+		return SETTLEMENT_SLOPE_CLIFF + 1.0
+	var hx_lo: float = _land_elev_m(ax - 1, az)
+	var hx_hi: float = _land_elev_m(ax + 1, az)
+	var hz_lo: float = _land_elev_m(ax, az - 1)
+	var hz_hi: float = _land_elev_m(ax, az + 1)
+	var gx: float = 0.0
+	var gz: float = 0.0
+	if not is_nan(hx_lo) and not is_nan(hx_hi):
+		gx = (hx_hi - hx_lo) / (2.0 * CELL_METRES)
+	elif not is_nan(hx_hi):
+		gx = (hx_hi - h0) / CELL_METRES
+	elif not is_nan(hx_lo):
+		gx = (h0 - hx_lo) / CELL_METRES
+	if not is_nan(hz_lo) and not is_nan(hz_hi):
+		gz = (hz_hi - hz_lo) / (2.0 * CELL_METRES)
+	elif not is_nan(hz_hi):
+		gz = (hz_hi - h0) / CELL_METRES
+	elif not is_nan(hz_lo):
+		gz = (h0 - hz_lo) / CELL_METRES
+	return sqrt(gx * gx + gz * gz)
+
+
+## Continuous flatness: 1 / (1 + (s/s0)²). Best sites rank highest.
+func _flatness_fitness(ax: int, az: int) -> float:
+	var s: float = _local_slope(ax, az)
+	var t: float = s / SETTLEMENT_SLOPE_REF
+	return 1.0 / (1.0 + t * t)
+
+
+func _cell_is_settlement_flat(ax: int, az: int) -> bool:
+	return (
+		_local_slope(ax, az) <= SETTLEMENT_SLOPE_CLIFF
+		and _flatness_fitness(ax, az) >= SETTLEMENT_FLATNESS_FLOOR
+	)
 
 
 func _touches_river(ax: int, az: int) -> bool:
@@ -1491,25 +1554,57 @@ func _seed_settlement_nodes(
 			break
 		_try_add_node(peak.y % size, peak.y / size, occupied, spacing, rng)
 
-	# Any landmass that carries real occupancy needs a hub, even if the budget
-	# was spent on a denser neighbour.
+	# Any landmass that carries flat, townable occupancy needs a hub, even if
+	# the budget was spent on a denser neighbour. Prefer densest then flattest.
 	var hosted: Dictionary = {}
 	for node in nodes:
 		if node.kind == AtlasFeatures.NodeKind.SETTLEMENT:
 			hosted[node.landmass] = true
-	for peak in peaks:
-		var idx: int = peak.y
-		var mass: int = landmass_id[idx]
-		if mass >= 0 and hosted.has(mass):
+	var best_flat: Dictionary = {}
+	for az in size:
+		for ax in size:
+			var idx: int = index_of(ax, az)
+			var pop: int = AtlasPack.population(cells[idx])
+			if pop < SETTLEMENT_MIN_POP:
+				continue
+			if not _cell_is_settlement_flat(ax, az):
+				continue
+			var mass: int = landmass_id[idx]
+			if mass < 0 or hosted.has(mass):
+				continue
+			var fitness: float = _flatness_fitness(ax, az)
+			var prev: Variant = best_flat.get(mass, null)
+			var take: bool = prev == null
+			if not take:
+				var prev_d: Dictionary = prev
+				take = (
+					pop > int(prev_d["pop"])
+					or (
+						pop == int(prev_d["pop"])
+						and (
+							fitness > float(prev_d["fitness"])
+							or (
+								is_equal_approx(fitness, float(prev_d["fitness"]))
+								and idx < int(prev_d["idx"])
+							)
+						)
+					)
+				)
+			if take:
+				best_flat[mass] = {"pop": pop, "fitness": fitness, "idx": idx}
+	for mass in best_flat.keys():
+		if hosted.has(mass):
 			continue
+		var pick: Dictionary = best_flat[mass]
+		var pick_idx: int = int(pick["idx"])
 		var before: int = nodes.size()
-		_try_add_node(idx % size, idx / size, occupied, maxi(2, spacing / 2), rng)
+		_try_add_node(pick_idx % size, pick_idx / size, occupied, maxi(2, spacing / 2), rng)
 		if nodes.size() > before:
-			hosted[landmass_id[idx]] = true
+			hosted[mass] = true
 
 
-## Local population maxima as (population, cell index), densest first. The index
-## tie-break keeps exactly one peak per flat plateau.
+## Local population maxima as (population, cell index), densest first, then
+## flattest (|∇h| fitness). Steep neighbourhoods are excluded.
 func _population_peaks() -> Array[Vector2i]:
 	var peaks: Array[Vector2i] = []
 	var radius: int = 2
@@ -1518,6 +1613,8 @@ func _population_peaks() -> Array[Vector2i]:
 			var idx: int = index_of(ax, az)
 			var pop: int = AtlasPack.population(cells[idx])
 			if pop < SETTLEMENT_MIN_POP:
+				continue
+			if not _cell_is_settlement_flat(ax, az):
 				continue
 			var is_peak: bool = true
 			for dz in range(-radius, radius + 1):
@@ -1539,7 +1636,13 @@ func _population_peaks() -> Array[Vector2i]:
 				peaks.append(Vector2i(pop, idx))
 	peaks.sort_custom(
 		func(a: Vector2i, b: Vector2i) -> bool:
-			return a.x > b.x if a.x != b.x else a.y < b.y
+			if a.x != b.x:
+				return a.x > b.x
+			var fa: float = _flatness_fitness(a.y % size, a.y / size)
+			var fb: float = _flatness_fitness(b.y % size, b.y / size)
+			if not is_equal_approx(fa, fb):
+				return fa > fb
+			return a.y < b.y
 	)
 	return peaks
 
@@ -1561,8 +1664,11 @@ func _try_add_node(
 		mass = 0
 		landmass_id[idx] = 0
 	var kind: int = AtlasFeatures.NodeKind.LANDMARK
-	if AtlasPack.population(cells[idx]) >= SETTLEMENT_MIN_POP:
-		# Occupied cells are towns first; a coastal town is still a town.
+	if (
+		AtlasPack.population(cells[idx]) >= SETTLEMENT_MIN_POP
+		and _cell_is_settlement_flat(ax, az)
+	):
+		# Occupied + locally flat → town. Steep high-pop cells stay landmarks.
 		kind = AtlasFeatures.NodeKind.SETTLEMENT
 	elif biome == AtlasBiomes.Id.COAST:
 		kind = AtlasFeatures.NodeKind.COASTAL_GATE
