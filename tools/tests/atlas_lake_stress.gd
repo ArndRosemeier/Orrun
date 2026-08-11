@@ -27,16 +27,46 @@ func _initialize() -> void:
 		for err in errors:
 			if str(err).begins_with("lake "):
 				lake_errs.append(err)
-		if lake_errs.is_empty() and errors.is_empty():
+		var m: Dictionary = atlas.depression_metrics
+		var band_line: String = (
+			"raw=%d promoted=%d coast=%d plains=%d hills=%d alpine=%d"
+			% [
+				int(m.get("raw_depressions", 0)),
+				int(m.get("promoted", 0)),
+				int(m.get("band_coast", 0)),
+				int(m.get("band_plains", 0)),
+				int(m.get("band_hills", 0)),
+				int(m.get("band_alpine", 0)),
+			]
+		)
+		var plains: int = int(m.get("band_plains", 0))
+		var hills: int = int(m.get("band_hills", 0))
+		var alpine: int = int(m.get("band_alpine", 0))
+		# Fail if every promoted lake is a plains sheet (lowland flood mode).
+		var plains_flood: bool = (
+			atlas.lakes.size() >= 4
+			and plains > 0
+			and hills + alpine == 0
+			and plains >= atlas.lakes.size()
+		)
+		if plains_flood:
+			failures += 1
 			print(
-				"  PASS  seed=%d size=%d lakes=%d secondary=%d ms=%d" % [
-					seed_i, size_i, atlas.lakes.size(), atlas.secondary_massif_count, atlas.generate_ms
+				"  FAIL  seed=%d size=%d plains-only flood lakes=%d | %s" % [
+					seed_i, size_i, atlas.lakes.size(), band_line
+				]
+			)
+		elif lake_errs.is_empty() and errors.is_empty():
+			print(
+				"  PASS  seed=%d size=%d lakes=%d secondary=%d ms=%d | %s" % [
+					seed_i, size_i, atlas.lakes.size(), atlas.secondary_massif_count,
+					atlas.generate_ms, band_line
 				]
 			)
 		elif lake_errs.is_empty():
 			print(
-				"  WARN  seed=%d size=%d non-lake errors=%d (ignored here)" % [
-					seed_i, size_i, errors.size()
+				"  WARN  seed=%d size=%d non-lake errors=%d (ignored here) | %s" % [
+					seed_i, size_i, errors.size(), band_line
 				]
 			)
 			for err in errors:
@@ -44,7 +74,9 @@ func _initialize() -> void:
 		else:
 			failures += 1
 			print(
-				"  FAIL  seed=%d size=%d lakes=%d" % [seed_i, size_i, atlas.lakes.size()]
+				"  FAIL  seed=%d size=%d lakes=%d | %s" % [
+					seed_i, size_i, atlas.lakes.size(), band_line
+				]
 			)
 			for err in lake_errs:
 				print("        · ", err)

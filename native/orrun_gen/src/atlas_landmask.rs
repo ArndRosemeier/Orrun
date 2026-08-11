@@ -17,6 +17,7 @@ pub struct LandmaskParams {
 	pub seed_relief: i32,
 	pub seed_warp: i32,
 	pub seed_warp2: i32,
+	pub seed_basin: i32,
 }
 
 pub fn build_landmask(p: LandmaskParams) -> Dictionary<Variant, Variant> {
@@ -31,6 +32,11 @@ pub fn build_landmask(p: LandmaskParams) -> Dictionary<Variant, Variant> {
 	let relief_n = Noise2D::atlas_fbm(p.seed_relief, 0.008, 3);
 	let warp = Noise2D::atlas_fbm(p.seed_warp, 0.0035, 4);
 	let warp2 = Noise2D::atlas_fbm(p.seed_warp2, 0.0016, 3);
+	// Mid-scale valley / basin field. Ridged highs are divides; lows become
+	// closed catchments once amplitude exceeds local slope.
+	let basin_ridge = Noise2D::atlas_ridged(p.seed_basin, 0.011, 4);
+	let basin_fbm = Noise2D::atlas_fbm(p.seed_basin ^ 0x5F3759DF_u32 as i32, 0.0075, 3);
+	let basin_large = Noise2D::atlas_fbm(p.seed_basin.wrapping_add(0x27D4_EB2D), 0.0032, 3);
 
 	let half = p.size as f32 * 0.5;
 	let collar_cells = collar_cells(p.size);
@@ -84,12 +90,37 @@ pub fn build_landmask(p: LandmaskParams) -> Dictionary<Variant, Variant> {
 			let alpine = ridge.powf(1.35) * smoothstep(0.2, 0.7, landness);
 			let mut code_f = 48.0 + landness * 70.0 + alpine * 130.0;
 			code_f += relief_n.get(wx, wz) * 10.0;
+
+			// Inland weight: kill basin cut near the ocean collar so coastal
+			// plains are not carved into lagoon sheets.
+			let inland = smoothstep(
+				soft_margin + p.size as f32 * 0.05,
+				soft_margin + p.size as f32 * 0.20,
+				edge_d as f32,
+			) * smoothstep(0.14, 0.48, landness);
+
+			// Elongated valley floors from inverted ridged divides.
+			let divide = basin_ridge.get(wx * 0.92, wz * 1.08) * 0.5 + 0.5;
+			let valley = (1.0 - divide).powf(1.75);
+			// Stretch basins along a warped axis so they are not round bowls.
+			let wx_stretch = wx * 1.35 + wz * 0.22;
+			let wz_stretch = wz * 0.55 - wx * 0.18;
+			let dip_raw = -basin_fbm.get(wx_stretch, wz_stretch);
+			let dip = dip_raw.max(0.0).powf(1.45);
+			let big_raw = -basin_large.get(wx * 0.7, wz * 0.7);
+			let big = big_raw.max(0.0).powf(2.35);
+
+			let basin_cut = (valley * 20.0 + dip * 16.0 + big * 26.0) * inland;
+			code_f -= basin_cut;
+
 			elev_code[idx] = (code_f as i32).clamp(33, 255) as u8;
 			relief[idx] = ((alpine * 50.0 + relief_n.get(wz, wx) * 8.0 + 4.0) as i32).clamp(0, 63) as u8;
 
 			let mut h = moist.get(wx, wz) * 0.5 + 0.5;
 			h = lerp(h, 0.85, radial.clamp(0.0, 1.0) * 0.35) * 0.35 + h * 0.65;
 			h -= alpine * 0.25;
+			// Basin floors hold moisture slightly better than ridges.
+			h += (valley * 0.08 + dip * 0.05) * inland;
 			humidity[idx] = ((h * 255.0) as i32).clamp(0, 255) as u8;
 		}
 	}

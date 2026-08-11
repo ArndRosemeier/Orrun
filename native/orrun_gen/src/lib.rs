@@ -190,6 +190,7 @@ impl OrrunGen {
 			seed_relief: get_seed("seed_relief"),
 			seed_warp: get_seed("seed_warp"),
 			seed_warp2: get_seed("seed_warp2"),
+			seed_basin: get_seed("seed_basin"),
 		})
 	}
 

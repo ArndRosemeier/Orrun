@@ -111,13 +111,24 @@ func _test_climate_sanity(atlas: ContinentAtlas) -> void:
 	_check("has land", land > atlas.size * 4)
 	_check("has lakes", lake > 0 and atlas.lakes.size() > 0)
 	_check("lake cells match lakes", lake > 0)
-	var lake_floor: int = maxi(8, ContinentAtlas.LAKE_TARGET_FULL * atlas.size / ContinentAtlas.SIZE)
-	# Placement is stochastic; require a healthy majority of the target count.
+	var lake_floor: int = maxi(3, ContinentAtlas.LAKE_FLOOR_FULL * atlas.size / ContinentAtlas.SIZE)
+	# Detection is terrain-driven; floor is a scaled minimum, not a carve quota.
 	_check(
 		"lake count scaled",
-		atlas.lakes.size() >= maxi(4, lake_floor / 2),
+		atlas.lakes.size() >= lake_floor,
 		"(%d lakes, floor %d)" % [atlas.lakes.size(), lake_floor]
 	)
+	var metrics: Dictionary = atlas.depression_metrics
+	if not metrics.is_empty() and atlas.lakes.size() >= 4:
+		var hills_or_higher: int = (
+			int(metrics.get("band_hills", 0)) + int(metrics.get("band_alpine", 0))
+		)
+		var plains_band: int = int(metrics.get("band_plains", 0))
+		_check(
+			"lakes not only plains flood",
+			hills_or_higher > 0,
+			"(hills+ %d plains %d)" % [hills_or_higher, plains_band]
+		)
 	_check("sea_surface_z is 0", atlas.sea_surface_z == 0)
 	_check("schema version", atlas.schema_version == ContinentAtlas.SCHEMA_VERSION)
 

@@ -175,6 +175,12 @@ height). Do it now.
 - One **surface class** (elevation code of the spill) — flat across the basin
   at atlas resolution
 
+Lakes are **not** carved in an after-pass. Landmask basin noise and orogen
+valley wells create closed lows in elevation; a depression finder promotes
+basins that pass depth, size, humidity, and plains-area gates. Bed elevation
+stays the natural floor (clamped strictly below the water surface). Coastal
+basins that touch the ocean are merged into the ocean datum.
+
 Rules:
 
 - Rivers may terminate in a lake or continue through a lake via the spill into
@@ -185,9 +191,10 @@ Rules:
   to another atlas cell.
 
 Minimum presence: a non-trivial seed should produce **many** inland lakes, not
-only ocean mouths. Count scales with atlas area (~96 targets at 1000² km). Most
-are fixed-kilometre **ponds**; a rarer high tail grows into large inland basins
-(up to the atlas lake cell cap). Tests assert count, size variance, and outlets.
+only ocean mouths. Count scales with atlas area (soft target ~48, test floor
+~16 at 1000² km). Size variance comes from natural catchment sizes (ponds up
+through large inland basins, capped). Tests assert count, size variance,
+outlets, and elev-band mix.
 
 ---
 
@@ -273,7 +280,7 @@ Road link rules:
 1. **Landmask + ocean collar** (border sea frame + continent noise).
 2. **Elevation + relief + humidity** on land (and shelf codes on ocean if useful).
 3. **Orogens** — 1–2 primary Alps belts, then secondary fixed-km massifs.
-4. **Atlas lakes** — many ponds + rare large basins → `LAKE` cells + spill.
+4. **Atlas lakes** — detect closed depressions in elev → `LAKE` cells + spill.
 5. **Woodland humidity** — mid-scale moist patches / clearings (not continent FBM alone).
 6. **Biome classify** (including `COAST`, `LAKE`, `OCEAN`, patchy `FOREST`).
 7. **River graph** — major trunks only: flow accumulation on atlas elevation

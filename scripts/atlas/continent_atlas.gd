@@ -8,7 +8,7 @@ const SIZE: int = 1000
 const CELL_METRES: float = 1000.0
 ## Bump when atlas cell/graph meaning changes. Stored in BakeCache atlas headers
 ## so stale atlas.bin files miss (see docs/BAKE_CACHE.md).
-const SCHEMA_VERSION: int = 4
+const SCHEMA_VERSION: int = 5
 const SEA_SURFACE_Z: int = 0
 const OCEAN_COLLAR_FULL: int = 48
 const RIVER_ACCUM_THRESHOLD: float = 180.0
@@ -19,7 +19,16 @@ const LAKE_MIN_CELLS: int = 6
 ## Soft cap for common ponds; rare inland lakes may grow to LAKE_MAX_CELLS_FULL.
 const LAKE_POND_MAX_CELLS: int = 40
 const LAKE_MAX_CELLS_FULL: int = 450
-const LAKE_TARGET_FULL: int = 96
+## Soft density expectation at full atlas size (detection, not a placement quota).
+const LAKE_TARGET_FULL: int = 48
+## Hard test floor at full atlas size — scaled by area in tests.
+const LAKE_FLOOR_FULL: int = 16
+## Mean landmask humidity below this keeps a closed sink dry (endorheic).
+const LAKE_HUMIDITY_MIN: int = 56
+## Surface codes at or below this are "plains"; large plains basins are rejected.
+const LAKE_PLAINS_SURFACE_MAX: int = 110
+## Spill must clear sea codes so inland lakes are not coastal flood sheets.
+const LAKE_MIN_SPILL_CODE: int = 36
 const PRIMARY_NODE_TARGET: int = 72
 ## Primary orogen half-widths (km/cells): never grow past these on large atlases.
 const OROGEN_CORE_R_CAP: float = 12.0
@@ -75,6 +84,8 @@ var mouth_distance: PackedInt32Array = PackedInt32Array()
 var generate_ms: int = 0
 ## Secondary fixed-km massifs stamped after the primary Alps belts (tests/debug).
 var secondary_massif_count: int = 0
+## Post-orogen closed-depression stats from lake detection (tests/debug).
+var depression_metrics: Dictionary = {}
 ## Scratch while [_build_roads] runs; not part of the published atlas.
 var _road_channel_mask: PackedByteArray = PackedByteArray()
 var _road_native: RefCounted = null
@@ -512,7 +523,7 @@ func _build() -> void:
 	# Continental mountain belts (Alps-scale orogens) plus denser secondary
 	# massifs. Landmask noise alone almost never reaches mountain codes.
 	_apply_orogens(land, elev_code, humidity, relief)
-	_build_lakes(land, elev_code)
+	_build_lakes(land, elev_code, humidity)
 	_merge_coastal_lakes_into_ocean(land, elev_code)
 	_label_landmasses(land)
 	_modulate_woodland_humidity(land, elev_code, humidity)
@@ -561,6 +572,7 @@ func _build_landmask_elevation(
 		"seed_relief": _layer_seed("atlas_relief"),
 		"seed_warp": _layer_seed("atlas_warp"),
 		"seed_warp2": _layer_seed("atlas_warp2"),
+		"seed_basin": _layer_seed("atlas_basin"),
 	}
 	var result: Variant = native.call("atlas_landmask", params)
 	assert(
@@ -823,7 +835,21 @@ func _raise_orogen_loft(
 			code_f -= incision
 
 		var target: int = clampi(int(code_f), 33, peak_code_max)
-		if target > int(elev_code[i]):
+		# Intermontane / dissected floors: deepen instead of lofting shut so
+		# closed catchments survive between raised crest cells.
+		var valley_strength: float = (
+			(1.0 - massif)
+			* smoothstep(0.10, -0.45, dissect)
+			* belt_w
+		)
+		if valley_strength > 0.38 and loft > 0.22:
+			var well: int = clampi(
+				int(lerpf(3.0, 14.0, valley_strength) * loft_amp),
+				2,
+				16
+			)
+			elev_code[i] = clampi(int(elev_code[i]) - well, 33, peak_code_max)
+		elif target > int(elev_code[i]):
 			elev_code[i] = target
 
 		var variance: float = absf(undulation) * belt_w + needle * loft
@@ -925,328 +951,242 @@ func _lake_max_cells() -> int:
 	return clampi(size * size / 90, 48, LAKE_MAX_CELLS_FULL)
 
 
-## Place atlas lakes as irregular basins with real spill rims. A sloping
-## continent with only a priority flood often has no closed depressions left,
-## so we carve varied bowls and wire their outlets into the drainage.
-func _build_lakes(land: PackedByteArray, elev_code: PackedByteArray) -> void:
-	var want: int = maxi(8, LAKE_TARGET_FULL * size / SIZE)
-	var collar: int = _collar_cells() + 4
-	if collar >= size / 2:
-		collar = maxi(2, size / 8)
-	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
-	rng.seed = _layer_seed("atlas_lake_seeds")
-	var step: int = maxi(6, size / maxi(want, 1))
-	var ax: int = collar + step / 2
-	while ax < size - collar and lakes.size() < want:
-		var az: int = collar + step / 2
-		while az < size - collar and lakes.size() < want:
-			var jx: int = clampi(ax + rng.randi_range(-step / 3, step / 3), collar, size - collar - 1)
-			var jz: int = clampi(az + rng.randi_range(-step / 3, step / 3), collar, size - collar - 1)
-			_try_place_lake(jx, jz, land, elev_code, rng)
-			az += step
-		ax += step
-	if lakes.size() < want:
-		var scans: int = 0
-		while lakes.size() < want and scans < size * 8:
-			scans += 1
-			_try_place_lake(
-				rng.randi_range(collar, size - collar - 1),
-				rng.randi_range(collar, size - collar - 1),
-				land, elev_code, rng
-			)
-
-
-func _try_place_lake(
-	ax: int,
-	az: int,
+## Promote closed topographic depressions to atlas lakes. Basins come from
+## landmask/orogen elevation; this pass only classifies and sets water surface.
+func _build_lakes(
 	land: PackedByteArray,
 	elev_code: PackedByteArray,
-	rng: RandomNumberGenerator
+	humidity: PackedByteArray
 ) -> void:
-	if not in_bounds(ax, az):
-		return
-	var idx: int = index_of(ax, az)
-	if land[idx] == 0 or lake_id[idx] >= 0:
-		return
-	# Prefer local lows so basins sit in natural hollows.
-	if not _is_local_low(ax, az, elev_code, land):
-		if rng.randf() > 0.35:
-			return
+	var filled: PackedByteArray = _compute_depression_fill(land, elev_code)
+	var pits: Array = _collect_depression_basins(land, elev_code, filled)
+	var max_cells: int = _lake_max_cells()
+	var raw_count: int = pits.size()
+	var promoted: int = 0
+	var rejected_small: int = 0
+	var rejected_shallow: int = 0
+	var rejected_dry: int = 0
+	var rejected_plains: int = 0
+	var rejected_spill: int = 0
+	var band_coast: int = 0
+	var band_plains: int = 0
+	var band_hills: int = 0
+	var band_alpine: int = 0
+	var depth_hist: PackedInt32Array = PackedInt32Array()
+	depth_hist.resize(16)
 
-	# Log-ish mix: many fixed-km ponds, occasional large inland lakes.
-	var t: float = pow(rng.randf(), 2.2)
-	var inland: bool = t > 0.78
-	var max_cells: int = _lake_max_cells() if inland else LAKE_POND_MAX_CELLS
-	var lo: int = LAKE_MIN_CELLS
-	var hi: int = max_cells
-	var target: int = clampi(int(lerpf(float(lo), float(hi), t)), lo, hi)
-	# Ponds use absolute km radii; only rare inland lakes scale with atlas size.
-	var scale: float = 1.0
-	if inland:
-		scale = lerpf(1.0, float(maxi(size, 64)) / 96.0, clampf((t - 0.78) / 0.22, 0.0, 1.0))
-	var rx: float = rng.randf_range(1.2, 4.5) * scale * lerpf(0.55, 1.4, t)
-	var rz: float = rng.randf_range(1.2, 4.5) * scale * lerpf(0.55, 1.4, t)
-	# Large lakes must not become near-circular inland discs. Always stretch the
-	# upper size range; smaller lakes vary between round ponds and long basins.
-	if inland or t > 0.30 or rng.randf() < 0.4:
-		if rng.randf() < 0.5:
-			rx *= rng.randf_range(1.8, 3.2)
-			rz *= rng.randf_range(0.30, 0.65)
-		else:
-			rz *= rng.randf_range(1.8, 3.2)
-			rx *= rng.randf_range(0.30, 0.65)
-	var rot: float = rng.randf() * TAU
-	var cos_r: float = cos(rot)
-	var sin_r: float = sin(rot)
-	var noise: FastNoiseLite = _make_noise(
-		"atlas_lake_shape_%d_%d" % [ax, az], 0.35, FastNoiseLite.FRACTAL_NONE, 1
-	)
-	var depth_carve: int = rng.randi_range(3, 14)
+	for pit_variant in pits:
+		var pit: Dictionary = pit_variant
+		var basin: PackedInt32Array = pit["cells"]
+		var spill_elev: int = int(pit["spill_elev"])
+		var floor_elev: int = int(pit["floor_elev"])
+		var spill_cell: int = int(pit["spill_cell"])
+		var depth: int = spill_elev - floor_elev
+		var depth_bucket: int = clampi(depth, 0, 15)
+		depth_hist[depth_bucket] = depth_hist[depth_bucket] + 1
 
-	var basin: PackedInt32Array = PackedInt32Array()
-	var span: int = int(ceili(maxi(rx, rz) * 1.6)) + 2
-	for dz in range(-span, span + 1):
-		for dx in range(-span, span + 1):
-			var nx: int = ax + dx
-			var nz: int = az + dz
-			if not in_bounds(nx, nz):
-				continue
-			var nb: int = index_of(nx, nz)
-			if land[nb] == 0 or lake_id[nb] >= 0:
-				continue
-			var lx: float = float(dx) * cos_r + float(dz) * sin_r
-			var lz: float = float(-dx) * sin_r + float(dz) * cos_r
-			var ellipse: float = (lx * lx) / (rx * rx) + (lz * lz) / (rz * rz)
-			ellipse += noise.get_noise_2d(float(nx), float(nz)) * 0.45
-			if ellipse <= 1.0:
-				basin.append(nb)
-
-	# Grow/shrink toward the target with a cheap elevation-biased flood so lakes
-	# are not identical stamped ellipses.
-	if basin.size() < target:
-		_grow_lake_basin(basin, target, land, elev_code, int(elev_code[idx]) + depth_carve)
-	elif basin.size() > target:
-		basin = _trim_lake_basin(
-			basin, target, ax, az, rx, rz, cos_r, sin_r, noise
-		)
-		if basin.size() < target:
-			_grow_lake_basin(
-				basin, target, land, elev_code, int(elev_code[idx]) + depth_carve
-			)
-
-	# Shore noise on the ellipse stamp can leave disconnected islands. Validation
-	# requires 4-connected basins, so keep only the seed component and regrow.
-	basin = _lake_keep_connected(basin, idx)
-	if basin.size() < target:
-		_grow_lake_basin(
-			basin, target, land, elev_code, int(elev_code[idx]) + depth_carve
-		)
-
-	if basin.size() < LAKE_MIN_CELLS or basin.size() > max_cells:
-		return
-	if not _basin_is_connected(basin):
-		return
-
-	var spill_cell: int = -1
-	var spill_out: int = -1
-	var rim_min: int = 999
-	for cell in basin:
-		var cx: int = cell % size
-		var cz: int = cell / size
-		for k in 4:
-			var nx: int = cx + NEIGHBOR_DX[k * 2]
-			var nz: int = cz + NEIGHBOR_DZ[k * 2]
-			if not in_bounds(nx, nz):
-				continue
-			var nb: int = index_of(nx, nz)
-			if land[nb] == 0:
-				# Ocean-touching basin: spill straight to sea.
-				if int(elev_code[nb]) < rim_min:
-					rim_min = int(elev_code[nb])
-					spill_cell = cell
-					spill_out = nb
-				continue
-			if lake_id[nb] >= 0:
-				continue
-			var in_basin: bool = false
-			for b in basin:
-				if b == nb:
-					in_basin = true
-					break
-			if in_basin:
-				continue
-			var ne: int = int(elev_code[nb])
-			if ne < rim_min:
-				rim_min = ne
-				spill_cell = cell
-				spill_out = nb
-
-	if spill_cell < 0:
-		spill_cell = basin[0]
-		rim_min = int(elev_code[idx]) + 6
-	var surface_code: int = clampi(rim_min - 1, 34, 250)
-	var lake: AtlasLake = AtlasLake.new()
-	lake.id = lakes.size()
-	lake.cells = basin
-	lake.spill_cell = spill_cell
-	lake.surface_code = surface_code
-	lake.surface_z = AtlasPack.elevation_to_metres(surface_code)
-	lakes.append(lake)
-	for cell in basin:
-		lake_id[cell] = lake.id
-		# Flat lake bed below the spill; deepest near the seed.
-		var cx: int = cell % size
-		var cz: int = cell / size
-		var dist: float = sqrt(float((cx - ax) * (cx - ax) + (cz - az) * (cz - az)))
-		var bed: int = surface_code - 2 - clampi(int(depth_carve - dist), 0, depth_carve)
-		elev_code[cell] = clampi(bed, 33, surface_code - 1)
-	# Notch the spill outlet slightly so drainage prefers the lake mouth.
-	if spill_out >= 0 and land[spill_out] != 0 and lake_id[spill_out] < 0:
-		elev_code[spill_out] = clampi(
-			mini(int(elev_code[spill_out]), surface_code + 1), 33, 255
-		)
-
-
-func _is_local_low(
-	ax: int, az: int, elev_code: PackedByteArray, land: PackedByteArray
-) -> bool:
-	var e: int = int(elev_code[index_of(ax, az)])
-	var lower_or_eq: int = 0
-	for k in 8:
-		var nx: int = ax + NEIGHBOR_DX[k]
-		var nz: int = az + NEIGHBOR_DZ[k]
-		if not in_bounds(nx, nz):
+		if basin.size() < LAKE_MIN_CELLS:
+			rejected_small += 1
 			continue
-		var nb: int = index_of(nx, nz)
-		if land[nb] == 0:
+		if basin.size() > max_cells:
+			rejected_plains += 1
 			continue
-		if int(elev_code[nb]) <= e:
-			lower_or_eq += 1
-	return lower_or_eq <= 2
+		if depth < LAKE_MIN_DEPTH_CODE:
+			rejected_shallow += 1
+			continue
 
+		var touches_ocean: bool = bool(pit["touches_ocean"])
+		if spill_elev < LAKE_MIN_SPILL_CODE and not touches_ocean:
+			rejected_spill += 1
+			continue
 
-func _grow_lake_basin(
-	basin: PackedInt32Array,
-	target: int,
-	land: PackedByteArray,
-	elev_code: PackedByteArray,
-	max_elev: int
-) -> void:
-	var in_basin: Dictionary = {}
-	for cell in basin:
-		in_basin[cell] = true
-	var guard: int = 0
-	while basin.size() < target and guard < target * 8:
-		guard += 1
-		var best: int = -1
-		var best_e: int = 999
+		var hum_sum: int = 0
 		for cell in basin:
-			var cx: int = cell % size
-			var cz: int = cell / size
+			hum_sum += int(humidity[cell])
+		var hum_mean: int = hum_sum / basin.size()
+		if hum_mean < LAKE_HUMIDITY_MIN and not touches_ocean:
+			rejected_dry += 1
+			continue
+
+		var surface_code: int = clampi(spill_elev - 1, 34, 250)
+		if (
+			not touches_ocean
+			and surface_code <= LAKE_PLAINS_SURFACE_MAX
+			and basin.size() > LAKE_POND_MAX_CELLS
+		):
+			rejected_plains += 1
+			continue
+
+		if not _basin_is_connected(basin):
+			rejected_small += 1
+			continue
+
+		var lake: AtlasLake = AtlasLake.new()
+		lake.id = lakes.size()
+		lake.cells = basin
+		lake.spill_cell = spill_cell if spill_cell >= 0 else basin[0]
+		lake.surface_code = surface_code
+		lake.surface_z = AtlasPack.elevation_to_metres(surface_code)
+		lakes.append(lake)
+		for cell in basin:
+			lake_id[cell] = lake.id
+			# Keep the natural floor; only enforce bed below the water surface.
+			elev_code[cell] = mini(int(elev_code[cell]), surface_code - 1)
+		promoted += 1
+
+		if surface_code <= 48:
+			band_coast += 1
+		elif surface_code <= LAKE_PLAINS_SURFACE_MAX:
+			band_plains += 1
+		elif surface_code < 168:
+			band_hills += 1
+		else:
+			band_alpine += 1
+
+	depression_metrics = {
+		"raw_depressions": raw_count,
+		"promoted": promoted,
+		"rejected_small": rejected_small,
+		"rejected_shallow": rejected_shallow,
+		"rejected_dry": rejected_dry,
+		"rejected_plains_or_huge": rejected_plains,
+		"rejected_spill": rejected_spill,
+		"band_coast": band_coast,
+		"band_plains": band_plains,
+		"band_hills": band_hills,
+		"band_alpine": band_alpine,
+		"depth_hist": depth_hist,
+	}
+
+
+## Priority-flood fill heights from the ocean without mutating elev_code.
+## Cells with filled > elev are closed depressions (spill = filled value).
+func _compute_depression_fill(
+	land: PackedByteArray, elev_code: PackedByteArray
+) -> PackedByteArray:
+	var count: int = size * size
+	var filled: PackedByteArray = PackedByteArray()
+	filled.resize(count)
+	var closed: PackedByteArray = PackedByteArray()
+	closed.resize(count)
+	var buckets: Array = []
+	buckets.resize(256)
+	for i in 256:
+		buckets[i] = PackedInt32Array()
+
+	var open_min: int = 256
+	for i in count:
+		if land[i] == 0:
+			var e: int = clampi(int(elev_code[i]), 0, 255)
+			filled[i] = e
+			buckets[e].append(i)
+			closed[i] = 1
+			open_min = mini(open_min, e)
+		else:
+			filled[i] = 255
+
+	while open_min < 256:
+		while open_min < 256 and buckets[open_min].is_empty():
+			open_min += 1
+		if open_min >= 256:
+			break
+		var cell: int = buckets[open_min][buckets[open_min].size() - 1]
+		buckets[open_min].remove_at(buckets[open_min].size() - 1)
+		var ax: int = cell % size
+		var az: int = cell / size
+		var ce: int = int(filled[cell])
+		var first_dir: int = posmod(
+			int(hash("%d:dep_flood:%d:%d" % [world_seed, ax, az])), 4
+		)
+		for step in 4:
+			var k: int = (first_dir + step) % 4
+			var nx: int = ax + NEIGHBOR_DX[k * 2]
+			var nz: int = az + NEIGHBOR_DZ[k * 2]
+			if not in_bounds(nx, nz):
+				continue
+			var nb: int = index_of(nx, nz)
+			if closed[nb] != 0:
+				continue
+			if land[nb] == 0:
+				closed[nb] = 1
+				filled[nb] = clampi(int(elev_code[nb]), 0, 255)
+				continue
+			var ne: int = maxi(int(elev_code[nb]), ce)
+			filled[nb] = ne
+			closed[nb] = 1
+			buckets[ne].append(nb)
+			open_min = mini(open_min, ne)
+	return filled
+
+
+## Connected components of pit cells (filled > elev) with spill metadata.
+func _collect_depression_basins(
+	land: PackedByteArray,
+	elev_code: PackedByteArray,
+	filled: PackedByteArray
+) -> Array:
+	var count: int = size * size
+	var seen: PackedByteArray = PackedByteArray()
+	seen.resize(count)
+	var pits: Array = []
+	var queue: PackedInt32Array = PackedInt32Array()
+
+	for start in count:
+		if land[start] == 0 or seen[start] != 0:
+			continue
+		if int(filled[start]) <= int(elev_code[start]):
+			continue
+		queue.clear()
+		queue.append(start)
+		seen[start] = 1
+		var head: int = 0
+		var basin: PackedInt32Array = PackedInt32Array()
+		var spill_elev: int = int(filled[start])
+		var floor_elev: int = int(elev_code[start])
+		var spill_cell: int = start
+		var spill_out_elev: int = 999
+		var touches_ocean: bool = false
+
+		while head < queue.size():
+			var cell: int = queue[head]
+			head += 1
+			basin.append(cell)
+			floor_elev = mini(floor_elev, int(elev_code[cell]))
+			spill_elev = mini(spill_elev, int(filled[cell]))
+			var ax: int = cell % size
+			var az: int = cell / size
 			for k in 4:
-				var nx: int = cx + NEIGHBOR_DX[k * 2]
-				var nz: int = cz + NEIGHBOR_DZ[k * 2]
+				var nx: int = ax + NEIGHBOR_DX[k * 2]
+				var nz: int = az + NEIGHBOR_DZ[k * 2]
 				if not in_bounds(nx, nz):
+					touches_ocean = true
 					continue
 				var nb: int = index_of(nx, nz)
-				if in_basin.has(nb) or land[nb] == 0 or lake_id[nb] >= 0:
+				if land[nb] == 0:
+					touches_ocean = true
+					if int(elev_code[nb]) < spill_out_elev:
+						spill_out_elev = int(elev_code[nb])
+						spill_cell = cell
 					continue
+				if int(filled[nb]) > int(elev_code[nb]):
+					if seen[nb] == 0:
+						seen[nb] = 1
+						queue.append(nb)
+					continue
+				# Dry neighbour on the rim — candidate pour point.
 				var ne: int = int(elev_code[nb])
-				if ne > max_elev:
-					continue
-				if ne < best_e:
-					best_e = ne
-					best = nb
-		if best < 0:
-			break
-		basin.append(best)
-		in_basin[best] = true
+				if ne < spill_out_elev:
+					spill_out_elev = ne
+					spill_cell = cell
 
-
-func _trim_lake_basin(
-	basin: PackedInt32Array,
-	target: int,
-	ax: int,
-	az: int,
-	rx: float,
-	rz: float,
-	cos_r: float,
-	sin_r: float,
-	noise: FastNoiseLite
-) -> PackedInt32Array:
-	var allowed: PackedByteArray = PackedByteArray()
-	allowed.resize(size * size)
-	var state: PackedByteArray = PackedByteArray()
-	state.resize(size * size)
-	for cell in basin:
-		allowed[cell] = 1
-
-	var start: int = index_of(ax, az)
-	if allowed[start] == 0:
-		var nearest_d2: int = 0x7fffffff
-		for cell in basin:
-			var cx: int = cell % size
-			var cz: int = cell / size
-			var d2: int = (cx - ax) * (cx - ax) + (cz - az) * (cz - az)
-			if d2 < nearest_d2:
-				nearest_d2 = d2
-				start = cell
-
-	var frontier: PackedInt32Array = PackedInt32Array([start])
-	state[start] = 1
-	var kept: PackedInt32Array = PackedInt32Array()
-	var phase: float = float(posmod(int(hash("%d:%d" % [ax, az])), 1000)) / 1000.0 * TAU
-	while not frontier.is_empty() and kept.size() < target:
-		var best_frontier_i: int = 0
-		var best_score: float = 1.0e12
-		for i in frontier.size():
-			var candidate: int = frontier[i]
-			var score: float = _lake_trim_score(
-				candidate, ax, az, rx, rz, cos_r, sin_r, noise, phase
-			)
-			if score < best_score:
-				best_score = score
-				best_frontier_i = i
-		var cell: int = frontier[best_frontier_i]
-		frontier.remove_at(best_frontier_i)
-		state[cell] = 2
-		kept.append(cell)
-		var cx: int = cell % size
-		var cz: int = cell / size
-		for k in 4:
-			var nx: int = cx + NEIGHBOR_DX[k * 2]
-			var nz: int = cz + NEIGHBOR_DZ[k * 2]
-			if not in_bounds(nx, nz):
-				continue
-			var nb: int = index_of(nx, nz)
-			if allowed[nb] == 0 or state[nb] != 0:
-				continue
-			state[nb] = 1
-			frontier.append(nb)
-	return kept
-
-
-func _lake_trim_score(
-	cell: int,
-	ax: int,
-	az: int,
-	rx: float,
-	rz: float,
-	cos_r: float,
-	sin_r: float,
-	noise: FastNoiseLite,
-	phase: float
-) -> float:
-	var cx: int = cell % size
-	var cz: int = cell / size
-	var dx: float = float(cx - ax)
-	var dz: float = float(cz - az)
-	var lx: float = dx * cos_r + dz * sin_r
-	var lz: float = -dx * sin_r + dz * cos_r
-	var ellipse: float = (lx * lx) / (rx * rx) + (lz * lz) / (rz * rz)
-	var shore_noise: float = noise.get_noise_2d(float(cx), float(cz)) * 0.48
-	var lobes: float = sin(atan2(lz, lx) * 3.0 + phase) * 0.16
-	return ellipse + shore_noise + lobes
+		pits.append({
+			"cells": basin,
+			"spill_elev": spill_elev,
+			"floor_elev": floor_elev,
+			"spill_cell": spill_cell,
+			"touches_ocean": touches_ocean,
+		})
+	return pits
 
 
 ## Keep the 4-connected component containing seed (or the nearest basin cell).
