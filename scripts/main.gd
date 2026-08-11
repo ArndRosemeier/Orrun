@@ -39,6 +39,11 @@ var _spawn_pending: bool = false
 var _terrain_material: ShaderMaterial
 var _water_material: ShaderMaterial
 var _boot_error: String = ""
+## Last known continental pose while the player is in the tree. Used so session
+## save during teardown cannot call [method Node3D.global_position] off-tree.
+var _session_world: Vector3 = Vector3.ZERO
+var _session_yaw: float = 0.0
+var _session_valid: bool = false
 
 
 func _ready() -> void:
@@ -109,6 +114,15 @@ func _bake_spawn_sector() -> void:
 				return
 			spawn_sector = WorldSector.generate(context, sector_coord)
 	var ground: float = continental.height_at(spawn_xz.x, spawn_xz.y)
+	# A prior crash/teardown can persist a Y deep under the mesh. Treat that as
+	# "unknown" so the spawn ray starts from the continental surface instead.
+	if saved_y > -INF and saved_y < ground - 25.0:
+		push_warning(
+			"Saved spawn Y %.1f m is %.1f m below continental ground; ignoring it" % [
+				saved_y, ground - saved_y
+			]
+		)
+		saved_y = -INF
 	_spawn_world = Vector3(
 		spawn_xz.x,
 		saved_y if saved_y > -INF else ground,
@@ -172,6 +186,15 @@ func _process(_delta: float) -> void:
 		return
 	if _spawn_pending:
 		_try_spawn()
+	_cache_session_pose()
+
+
+func _cache_session_pose() -> void:
+	if player == null or player.frozen or not player.is_inside_tree():
+		return
+	_session_world = player.world_position()
+	_session_yaw = player.rotation.y
+	_session_valid = true
 
 
 func _on_world_ready() -> void:
@@ -234,8 +257,13 @@ func _try_spawn() -> void:
 		return
 
 	var scene_xz: Vector2 = WorldOrigin.to_scene_xz(_spawn_world.x, _spawn_world.z)
+	# Ray from the higher of saved Y and continental ground so a bad session Y
+	# cannot aim the cast entirely under the mesh.
+	var hint_y: float = maxf(
+		_spawn_world.y, context.sampler().height_at(_spawn_world.x, _spawn_world.z)
+	)
 	var hit: Dictionary = WorldQuery.trace_ground(
-		get_world_3d().direct_space_state, scene_xz.x, scene_xz.y, _spawn_world.y
+		get_world_3d().direct_space_state, scene_xz.x, scene_xz.y, hint_y
 	)
 	if hit.is_empty():
 		return
@@ -245,6 +273,7 @@ func _try_spawn() -> void:
 	player.rotation.y = _spawn_yaw
 	_spawn_pending = false
 	loading_label.visible = false
+	_cache_session_pose()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -337,8 +366,16 @@ func set_terrain_debug_view(view: int) -> void:
 
 
 func _notification(what: int) -> void:
-	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_PREDELETE:
+	# Save on window close while the player is still in the tree. PREDELETE runs
+	# during teardown when global_position is already illegal — that used to
+	# write a corrupt session and the next boot could spawn under the world.
+	if what == NOTIFICATION_WM_CLOSE_REQUEST:
 		_save_session()
+		if streamer != null:
+			streamer.shutdown()
+		if sectors != null:
+			sectors.shutdown()
+	elif what == NOTIFICATION_PREDELETE:
 		if streamer != null:
 			streamer.shutdown()
 		if sectors != null:
@@ -371,18 +408,30 @@ func _resolve_spawn() -> Dictionary:
 
 
 func _save_session() -> void:
-	if player == null or player.frozen or context == null:
+	if context == null:
 		return
-	var world: Vector3 = player.world_position()
+	var world: Vector3 = Vector3.ZERO
+	var yaw: float = 0.0
+	if (
+		player != null
+		and is_instance_valid(player)
+		and player.is_inside_tree()
+		and not player.frozen
+	):
+		world = player.world_position()
+		yaw = player.rotation.y
+	elif _session_valid:
+		world = _session_world
+		yaw = _session_yaw
+	else:
+		return
 	var cfg: ConfigFile = ConfigFile.new()
 	cfg.set_value("player", "world_x", world.x)
 	cfg.set_value("player", "world_y", world.y)
 	cfg.set_value("player", "world_z", world.z)
-	cfg.set_value("player", "yaw", player.rotation.y)
+	cfg.set_value("player", "yaw", yaw)
 	var err: Error = cfg.save(SESSION_PATH)
 	if err != OK:
 		push_error("Failed to save player session to %s (error %d)" % [SESSION_PATH, err])
 	else:
-		print(
-			"saved session -> %.0f, %.0f (yaw %.2f)" % [world.x, world.z, player.rotation.y]
-		)
+		print("saved session -> %.0f, %.0f (yaw %.2f)" % [world.x, world.z, yaw])

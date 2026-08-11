@@ -8,6 +8,9 @@ var lod: int = 0
 var world_origin: Vector3 = Vector3.ZERO
 var max_contract_error: float = 0.0
 var triangle_count: int = 0
+## True once at least one walkable collider is in the tree. Mesh-only (deferred
+## collision or LOD>0) chunks must not be treated as spawnable ground.
+var walk_collision_ready: bool = false
 
 var _terrain: MeshInstance3D
 var _water: MeshInstance3D
@@ -31,6 +34,7 @@ func apply(
 	world_origin = Vector3(origin.x, 0.0, origin.y)
 	name = "Chunk_%d_%d" % [chunk.x, chunk.y]
 	_deferred_collision_faces.clear()
+	walk_collision_ready = false
 
 	var t0: int = Time.get_ticks_usec()
 	var collision_faces: int = _build_terrain(job, terrain_material, defer_collision)
@@ -182,6 +186,7 @@ func _add_faces_collision(faces: PackedVector3Array) -> void:
 	var body: StaticBody3D = StaticBody3D.new()
 	body.add_child(collider)
 	add_child(body)
+	walk_collision_ready = true
 
 
 func _add_bridge_multimesh(mesh: Mesh, transforms: Array[Transform3D]) -> void:

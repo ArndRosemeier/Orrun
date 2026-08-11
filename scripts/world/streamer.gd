@@ -606,16 +606,33 @@ func _instantiate_budgeted() -> Dictionary:
 
 
 func _install_one_deferred_collision() -> float:
-	while not _collision_deferred.is_empty():
-		var node: ChunkNode = _collision_deferred[0]
-		if not is_instance_valid(node) or not node.has_deferred_collision():
-			_collision_deferred.remove_at(0)
+	# Prefer colliders nearest the player so spawn/fauna are not stuck behind
+	# horizon soups.
+	var best_i: int = -1
+	var best_ring: int = 2147483647
+	for i in _collision_deferred.size():
+		var candidate: ChunkNode = _collision_deferred[i]
+		if not is_instance_valid(candidate) or not candidate.has_deferred_collision():
 			continue
-		var ms: float = node.install_deferred_collision()
-		if not node.has_deferred_collision():
-			_collision_deferred.remove_at(0)
-		return ms
-	return 0.0
+		var ring: int = maxi(
+			absi(candidate.chunk.x - _last_center.x),
+			absi(candidate.chunk.y - _last_center.y)
+		)
+		if ring < best_ring:
+			best_ring = ring
+			best_i = i
+	if best_i < 0:
+		_collision_deferred.clear()
+		return 0.0
+	if best_i > 0:
+		var near: ChunkNode = _collision_deferred[best_i]
+		_collision_deferred.remove_at(best_i)
+		_collision_deferred.insert(0, near)
+	var node: ChunkNode = _collision_deferred[0]
+	var ms: float = node.install_deferred_collision()
+	if not node.has_deferred_collision():
+		_collision_deferred.remove_at(0)
+	return ms
 
 
 func _install(job: ChunkJob, defer_collision: bool) -> Dictionary:
@@ -655,8 +672,16 @@ func _install(job: ChunkJob, defer_collision: bool) -> Dictionary:
 
 # --- queries -----------------------------------------------------------------------
 
+## True when the chunk has a scene node. For LOD0 this also requires walkable
+## collision — mesh-only (deferred collider) chunks must not pass spawn/fauna.
 func is_chunk_ready(chunk: Vector2i) -> bool:
-	return _chunks.has(WorldCoords.chunk_key(chunk))
+	var key: int = WorldCoords.chunk_key(chunk)
+	if not _chunks.has(key):
+		return false
+	var node: ChunkNode = _chunks[key]
+	if node.lod != 0:
+		return true
+	return node.walk_collision_ready
 
 
 func queue_depth() -> int:

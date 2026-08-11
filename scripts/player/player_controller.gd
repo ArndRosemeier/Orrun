@@ -32,6 +32,10 @@ func _ready() -> void:
 
 
 func world_position() -> Vector3:
+	assert(
+		is_inside_tree(),
+		"PlayerController.world_position requires the player to be inside the scene tree"
+	)
 	return WorldOrigin.to_world(global_position)
 
 
