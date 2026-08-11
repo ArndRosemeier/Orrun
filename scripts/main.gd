@@ -22,7 +22,8 @@ const WATER_SHADER: String = "res://shaders/water.gdshader"
 @onready var hydro_map: Control = $UI/HydroMap
 @onready var world_map: Control = $UI/WorldMap
 @onready var terrain_tune: Control = $UI/TerrainTune
-@onready var loading_label: Label = $UI/Loading
+@onready var splash: Control = $UI/Splash
+@onready var loading_label: Label = $UI/Splash/Loading
 
 var config: WorldConfig
 var context: WorldContext
@@ -65,7 +66,7 @@ func _ready() -> void:
 	var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
 	print("OrrunGen: %s" % [native.call("version")])
 
-	loading_label.text = "Charting %d km of continent..." % config.atlas_size
+	_show_splash("Charting %d km of continent..." % config.atlas_size)
 	# Atlas generation stays on a worker. Typed class_name factories such as
 	# WorldContext.create must run on the main thread — worker calls can fail
 	# with "Invalid type in function 'create'" (sibling RefCounted misread).
@@ -94,10 +95,10 @@ func _bake_atlas() -> void:
 
 
 func _complete_boot_from_atlas() -> void:
-	loading_label.text = "Building continental terrain..."
+	_show_splash("Building continental terrain...")
 	context = WorldContext.create(config, _baked_atlas)
 	_baked_atlas = null
-	loading_label.text = "Baking the spawn sector..."
+	_show_splash("Baking the spawn sector...")
 	_bake_phase = 2
 	_bake_task = WorkerThreadPool.add_task(_bake_spawn_sector)
 
@@ -197,7 +198,7 @@ func _process(_delta: float) -> void:
 		WorkerThreadPool.wait_for_task_completion(_bake_task)
 		_bake_task = -1
 		if not _boot_error.is_empty():
-			loading_label.text = _boot_error
+			_show_splash(_boot_error)
 			push_error(_boot_error)
 			_bake_phase = 0
 			return
@@ -271,11 +272,11 @@ func _on_world_ready() -> void:
 	world_map.setup_for_game(context.atlas, player)
 	world_map.teleport_requested.connect(_teleport_to_map)
 	debug_hud.bind(streamer, sectors, player, fauna_sim)
-	debug_hud.visible = true
+	debug_hud.visible = false
 	terrain_tune.bind(streamer, config)
 
 	_spawn_pending = true
-	loading_label.text = "Building the ground underfoot..."
+	_show_splash("Building the ground underfoot...")
 
 
 func _try_spawn() -> void:
@@ -301,8 +302,29 @@ func _try_spawn() -> void:
 	player.spawn_at_world(WorldOrigin.to_world(landing) + Vector3(0.0, 1.2, 0.0))
 	player.rotation.y = _spawn_yaw
 	_spawn_pending = false
-	loading_label.visible = false
+	_hide_splash()
 	_cache_session_pose()
+
+
+func _show_splash(status: String) -> void:
+	splash.visible = true
+	loading_label.visible = true
+	loading_label.text = status
+	# Cover the game until the player can move (boot and map travel).
+	if debug_hud != null:
+		debug_hud.visible = false
+	if world_map != null:
+		world_map.visible = false
+	if terrain_tune != null:
+		terrain_tune.visible = false
+	if hydro_map != null:
+		hydro_map.visible = false
+
+
+func _hide_splash() -> void:
+	splash.visible = false
+	debug_hud.visible = true
+	hydro_map.visible = true
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -378,10 +400,7 @@ func _teleport_to_map(world_xz: Vector2) -> void:
 	)
 	sectors.request_around(WorldCoords.sector_of(world_xz.x, world_xz.y))
 	_spawn_pending = true
-	loading_label.visible = true
-	loading_label.text = "Travelling..."
-	world_map.visible = false
-	hydro_map.visible = true
+	_show_splash("Travelling...")
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	print(
 		"teleport map -> %.0f, %.0f (sector %s)" % [
