@@ -108,7 +108,6 @@ func request(sector_coord: Vector2i, priority: float = 0.0) -> void:
 	job.bake_epoch = bake_epoch
 	_pending[key] = true
 	_queue.enqueue(job)
-	_queue.sort_waiting()
 
 
 ## Drops cached sectors and requeues around [param centre]. Used when

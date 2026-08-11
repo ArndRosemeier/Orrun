@@ -6,6 +6,9 @@ extends RefCounted
 ## BridgeSite.deck_z (anchors share that Y). Density hard-sets abutments to the
 ## same height after settlement terracing. Piers drop from the deck underside
 ## into the water. Missing kits fall back to the box placeholder.
+##
+## [method build] is safe for worker threads: it returns mesh references,
+## transforms, procedural arrays and collision faces — never SceneTree nodes.
 
 const PARAPET_HEIGHT: float = 0.85
 const PARAPET_THICKNESS: float = 0.38
@@ -21,11 +24,21 @@ class BuildResult extends RefCounted:
 	var end_mesh: Mesh = null
 	var end_transforms: Array[Transform3D] = []
 	## Procedural deck/piers (vertex colors), or pier-only under a kit.
-	var procedural_mesh: ArrayMesh = null
+	var procedural_vertices: PackedVector3Array = PackedVector3Array()
+	var procedural_normals: PackedVector3Array = PackedVector3Array()
+	var procedural_colors: PackedColorArray = PackedColorArray()
+	var procedural_indices: PackedInt32Array = PackedInt32Array()
+	## Triangle soup for ConcavePolygonShape3D, already in chunk-local space.
+	var collision_faces: PackedVector3Array = PackedVector3Array()
 	var uses_kit: bool = false
 
+	func has_procedural_mesh() -> bool:
+		return not procedural_indices.is_empty()
 
-static func build(site: BridgeSite, chunk_origin: Vector2) -> BuildResult:
+
+static func build(
+	site: BridgeSite, chunk_origin: Vector2, want_collision: bool = false
+) -> BuildResult:
 	var result: BuildResult = BuildResult.new()
 	var kit: BridgeLibrary.Kit = BridgeLibrary.kit_for(site.catalog_id)
 	if kit != null and kit.mid_mesh != null:
@@ -33,11 +46,25 @@ static func build(site: BridgeSite, chunk_origin: Vector2) -> BuildResult:
 		result.mid_mesh = kit.mid_mesh
 		result.end_mesh = kit.end_mesh
 		_tile_kit(site, chunk_origin, kit, result)
-		result.procedural_mesh = _build_piers(site, chunk_origin, kit.deck_top)
+		_fill_procedural(result, _build_piers(site, chunk_origin, kit.deck_top))
+		if want_collision:
+			_pack_kit_collision(result)
+			_pack_procedural_collision(result)
 		return result
 
-	result.procedural_mesh = _build_procedural(site, chunk_origin)
+	_fill_procedural(result, _build_procedural(site, chunk_origin))
+	if want_collision:
+		_pack_procedural_collision(result)
 	return result
+
+
+static func _fill_procedural(result: BuildResult, arrays: Dictionary) -> void:
+	if arrays.is_empty():
+		return
+	result.procedural_vertices = arrays["vertices"]
+	result.procedural_normals = arrays["normals"]
+	result.procedural_colors = arrays["colors"]
+	result.procedural_indices = arrays["indices"]
 
 
 static func _tile_kit(
@@ -113,7 +140,7 @@ static func _tile_kit(
 
 static func _build_piers(
 	site: BridgeSite, chunk_origin: Vector2, deck_top: float = DECK_THICKNESS
-) -> ArrayMesh:
+) -> Dictionary:
 	var a: Vector3 = site.anchor_a - Vector3(chunk_origin.x, 0.0, chunk_origin.y)
 	var b: Vector3 = site.anchor_b - Vector3(chunk_origin.x, 0.0, chunk_origin.y)
 	var span: float = site.span_length()
@@ -129,7 +156,7 @@ static func _build_piers(
 
 	var pier_count: int = maxi(int(span / PIER_SPACING) - 1, 0)
 	if pier_count <= 0:
-		return null
+		return {}
 
 	var vertices: PackedVector3Array = PackedVector3Array()
 	var normals: PackedVector3Array = PackedVector3Array()
@@ -150,10 +177,15 @@ static func _build_piers(
 			basis, Vector3(1.6, pier_depth, site.deck_width * 0.65), trim_color
 		)
 
-	return _mesh_from_arrays(vertices, normals, colors, indices)
+	return {
+		"vertices": vertices,
+		"normals": normals,
+		"colors": colors,
+		"indices": indices,
+	}
 
 
-static func _build_procedural(site: BridgeSite, chunk_origin: Vector2) -> ArrayMesh:
+static func _build_procedural(site: BridgeSite, chunk_origin: Vector2) -> Dictionary:
 	var vertices: PackedVector3Array = PackedVector3Array()
 	var normals: PackedVector3Array = PackedVector3Array()
 	var colors: PackedColorArray = PackedColorArray()
@@ -204,24 +236,54 @@ static func _build_procedural(site: BridgeSite, chunk_origin: Vector2) -> ArrayM
 			basis, Vector3(1.6, pier_depth, site.deck_width * 0.65), trim_color
 		)
 
-	return _mesh_from_arrays(vertices, normals, colors, indices)
+	return {
+		"vertices": vertices,
+		"normals": normals,
+		"colors": colors,
+		"indices": indices,
+	}
 
 
-static func _mesh_from_arrays(
-	vertices: PackedVector3Array,
-	normals: PackedVector3Array,
-	colors: PackedColorArray,
-	indices: PackedInt32Array
-) -> ArrayMesh:
-	var mesh: ArrayMesh = ArrayMesh.new()
-	var arrays: Array = []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = vertices
-	arrays[Mesh.ARRAY_NORMAL] = normals
-	arrays[Mesh.ARRAY_COLOR] = colors
-	arrays[Mesh.ARRAY_INDEX] = indices
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	return mesh
+static func _pack_kit_collision(result: BuildResult) -> void:
+	_append_mesh_collision_faces(
+		result.collision_faces, result.mid_mesh, result.mid_transforms
+	)
+	_append_mesh_collision_faces(
+		result.collision_faces, result.end_mesh, result.end_transforms
+	)
+
+
+static func _pack_procedural_collision(result: BuildResult) -> void:
+	if not result.has_procedural_mesh():
+		return
+	var verts: PackedVector3Array = result.procedural_vertices
+	var indices: PackedInt32Array = result.procedural_indices
+	for i in range(0, indices.size(), 3):
+		result.collision_faces.append(verts[indices[i]])
+		result.collision_faces.append(verts[indices[i + 1]])
+		result.collision_faces.append(verts[indices[i + 2]])
+
+
+static func _append_mesh_collision_faces(
+	out: PackedVector3Array, mesh: Mesh, transforms: Array[Transform3D]
+) -> void:
+	if mesh == null or transforms.is_empty():
+		return
+	for xform in transforms:
+		for surface_i in mesh.get_surface_count():
+			var arrays: Array = mesh.surface_get_arrays(surface_i)
+			var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+			var indices: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
+			if indices.is_empty():
+				for i in range(0, verts.size(), 3):
+					out.append(xform * verts[i])
+					out.append(xform * verts[i + 1])
+					out.append(xform * verts[i + 2])
+			else:
+				for i in range(0, indices.size(), 3):
+					out.append(xform * verts[indices[i]])
+					out.append(xform * verts[indices[i + 1]])
+					out.append(xform * verts[indices[i + 2]])
 
 
 static func _add_box(

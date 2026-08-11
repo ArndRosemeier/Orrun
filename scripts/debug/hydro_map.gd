@@ -5,6 +5,8 @@ extends Control
 ## the whole atlas and teleport. The minimap only redraws when the player
 ## crosses into a new sector.
 
+const _HitchLog: GDScript = preload("res://scripts/core/hitch_log.gd")
+
 var sectors: SectorManager
 var player: Node3D
 
@@ -13,6 +15,7 @@ var _drawn_sector: Vector2i = Vector2i(2147483647, 2147483647)
 var _sector: WorldSector
 var _origin: Vector2 = Vector2.ZERO
 var _side: float = 1.0
+var _pixel_step: int = 1
 
 
 func build(sector_manager: SectorManager, player_node: Node3D) -> void:
@@ -32,19 +35,37 @@ func _refresh() -> void:
 		return
 	_sector = sector
 	_drawn_sector = coord
-	_texture = ImageTexture.create_from_image(_render_sector(sector))
+	var t0: int = Time.get_ticks_usec()
+	var image: Image = _render_sector(sector)
+	var render_ms: float = (Time.get_ticks_usec() - t0) * 0.001
+	t0 = Time.get_ticks_usec()
+	_texture = ImageTexture.create_from_image(image)
+	var upload_ms: float = (Time.get_ticks_usec() - t0) * 0.001
+	_HitchLog.record(
+		"hydro_map",
+		render_ms + upload_ms,
+		{"render": render_ms, "upload": upload_ms},
+		"sector=%d,%d cells=%d" % [coord.x, coord.y, sector.terrain.cells]
+	)
 
 
 func _render_sector(sector: WorldSector) -> Image:
 	var cells: int = sector.terrain.cells
-	var image: Image = Image.create_empty(cells, cells, false, Image.FORMAT_RGB8)
+	# Quarter-res relief is plenty for a corner minimap and keeps sector-cross
+	# redraws off the hitch log (full 314² was ~270 ms; step 4 is ~30–40 ms).
+	var step: int = 4
+	_pixel_step = step
+	var side: int = (cells + step - 1) / step
+	var image: Image = Image.create_empty(side, side, false, Image.FORMAT_RGB8)
 
 	var low: float = sector.terrain.min_elevation
 	var high: float = sector.terrain.max_elevation
 	var span: float = maxf(high - low, 1.0)
 
-	for cz in cells:
-		for cx in cells:
+	for iz in side:
+		for ix in side:
+			var cx: int = mini(ix * step, cells - 1)
+			var cz: int = mini(iz * step, cells - 1)
 			var index: int = cz * cells + cx
 			var height: float = sector.terrain.elevation[index]
 			var t: float = (height - low) / span
@@ -72,7 +93,7 @@ func _render_sector(sector: WorldSector) -> Image:
 				color = Color(0.16, 0.34, 0.52).lerp(
 					Color(0.04, 0.12, 0.28), clampf(depth / 18.0, 0.0, 1.0)
 				)
-			image.set_pixel(cx, cz, color)
+			image.set_pixel(ix, iz, color)
 
 	_draw_rivers(image)
 	_draw_roads(image)
@@ -129,7 +150,8 @@ func _draw_claims(image: Image) -> void:
 
 
 func _to_pixel(world_x: float, world_z: float) -> Vector2i:
-	return _sector.terrain.local_cell_of(world_x, world_z)
+	var cell: Vector2i = _sector.terrain.local_cell_of(world_x, world_z)
+	return Vector2i(int(cell.x / _pixel_step), int(cell.y / _pixel_step))
 
 
 func _line(image: Image, a: Vector3, b: Vector3, color: Color, thickness: int) -> void:
@@ -165,7 +187,7 @@ func _draw() -> void:
 	var pad: float = 8.0
 	_side = minf(size.x, size.y) - pad * 2.0
 	_origin = Vector2((size.x - _side) * 0.5, (size.y - _side) * 0.5)
-	var pixels: float = float(_sector.terrain.cells)
+	var pixels: float = float(maxi(_texture.get_width(), 1))
 
 	draw_rect(
 		Rect2(_origin - Vector2.ONE * 4.0, Vector2.ONE * (_side + 8.0)),

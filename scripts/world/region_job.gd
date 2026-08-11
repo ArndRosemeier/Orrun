@@ -5,6 +5,8 @@ extends GenQueue.Job
 
 var sector: WorldSector
 var region: Vector2i
+## Matches [member Streamer.mesh_epoch] at enqueue; stale pages are dropped.
+var mesh_epoch: int = 0
 var result: RegionData
 
 

@@ -2,8 +2,9 @@ class_name ChunkJob
 extends GenQueue.Job
 ## Everything one chunk needs, computed off the main thread.
 ##
-## Inputs are the owning sector plus its page; outputs are plain arrays. The job
-## never creates a Node, Mesh or Shape - see [ChunkNode] for that half.
+## Inputs are the owning sector plus its page; outputs are plain arrays (and
+## shared kit Mesh refs for bridges). The job never creates a Node or Shape —
+## see [ChunkNode] for that half.
 ##
 ## The continental sampler and the noise set are built here rather than passed
 ## in: both own FastNoiseLite state, which is not safe to read from two threads
@@ -28,6 +29,8 @@ var mesh_data: MeshExtract.MeshData
 var water_data: WaterSurface.WaterData
 var props: Dictionary = {}
 var bridges: Array[BridgeSite] = []
+## Prebuilt bridge visuals/collision from [BridgeBuilder] (worker thread).
+var bridge_builds: Array[BridgeBuilder.BuildResult] = []
 var max_contract_error: float = 0.0
 var build_ms: int = 0
 ## Phase breakdown for the HUD (density / mesh / water / dress).
@@ -52,6 +55,7 @@ func run() -> void:
 
 	var bounds: Rect2 = Rect2(chunk_origin, Vector2.ONE * config.chunk_size)
 	bridges.clear()
+	bridge_builds.clear()
 	for site in region.bridges:
 		var centre: Vector3 = site.center()
 		if bounds.has_point(Vector2(centre.x, centre.z)):
@@ -91,6 +95,9 @@ func run() -> void:
 			var bag: Array = props.get(clutter_id, [])
 			bag.append_array(clutter[clutter_id])
 			props[clutter_id] = bag
+
+	for site in bridges:
+		bridge_builds.append(BridgeBuilder.build(site, chunk_origin, want_collision))
 	dress_ms = Time.get_ticks_msec() - t0
 
 	build_ms = Time.get_ticks_msec() - started

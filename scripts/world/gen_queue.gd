@@ -19,6 +19,7 @@ class Job extends RefCounted:
 var max_in_flight: int = 4
 var _running: Array[Job] = []
 var _waiting: Array[Job] = []
+var _needs_sort: bool = false
 
 
 func _init(concurrency: int = 0) -> void:
@@ -29,11 +30,13 @@ func _init(concurrency: int = 0) -> void:
 
 func enqueue(job: Job) -> void:
 	_waiting.append(job)
+	_needs_sort = true
 
 
 ## Nearest work first, so the ground under the player appears before the horizon.
 func sort_waiting() -> void:
 	_waiting.sort_custom(func(a: Job, b: Job) -> bool: return a.priority < b.priority)
+	_needs_sort = false
 
 
 ## Refresh priorities from the caller's current focus (player chunk), then sort.
@@ -46,6 +49,8 @@ func retarget_waiting(update_priority: Callable) -> void:
 
 
 func pump() -> void:
+	if _needs_sort and not _waiting.is_empty():
+		sort_waiting()
 	while _running.size() < max_in_flight and not _waiting.is_empty():
 		var job: Job = _waiting.pop_front()
 		job.task_id = WorkerThreadPool.add_task(Callable(job, "run"))
@@ -89,6 +94,8 @@ func drop_waiting(should_drop: Callable) -> Array[Job]:
 		else:
 			kept.append(job)
 	_waiting = kept
+	if not dropped.is_empty():
+		_needs_sort = true
 	return dropped
 
 

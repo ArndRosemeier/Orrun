@@ -3,6 +3,7 @@ extends Node3D
 ## Near-player wildlife simulation. Spawns live [FaunaAgent] nodes from habitat.
 
 const CATALOG_PATH: String = "res://assets/catalog/fauna.json"
+const _HitchLog: GDScript = preload("res://scripts/core/hitch_log.gd")
 
 var context: WorldContext
 var sectors: SectorManager
@@ -19,10 +20,22 @@ var stat_caught: int = 0
 
 var _agents: Array[FaunaAgent] = []
 var _occupied_cells: Dictionary = {}
+## Cells already occupancy-rolled (spawned or declined). Prevents re-scoring the
+## whole lattice every refresh while collision/streaming is still catching up.
+var _settled_cells: Dictionary = {}
 var _next_agent_id: int = 1
 var _next_flock_id: int = 1
 var _refresh_accum: float = 0.0
 var _enabled: bool = true
+## Resume scan across frames so one refresh cannot monopolise the main thread.
+var _scan_cx: int = 0
+var _scan_cz: int = 0
+var _scan_min_cx: int = 0
+var _scan_max_cx: int = -1
+var _scan_min_cz: int = 0
+var _scan_max_cz: int = -1
+## Soft cap for one refresh slice (microseconds).
+const REFRESH_BUDGET_USEC: int = 2000
 
 
 func setup(
@@ -57,13 +70,30 @@ func _process(delta: float) -> void:
 	_refresh_accum += delta
 	if _refresh_accum >= context.config.fauna_refresh_interval:
 		_refresh_accum = 0.0
+		var t0: int = Time.get_ticks_usec()
+		var before: int = agent_count
 		_refresh_population()
+		var refresh_ms: float = (Time.get_ticks_usec() - t0) * 0.001
+		_HitchLog.record(
+			"fauna_refresh",
+			refresh_ms,
+			{"refresh": refresh_ms},
+			"agents=%d->%d spawned=%d" % [before, agent_count, stat_spawned]
+		)
 
+	var t_tick: int = Time.get_ticks_usec()
 	var live: Array[FaunaAgent] = _agents.duplicate()
 	for agent in live:
 		if not is_instance_valid(agent):
 			continue
 		agent.tick(delta, _agents)
+	var tick_ms: float = (Time.get_ticks_usec() - t_tick) * 0.001
+	_HitchLog.record(
+		"fauna_tick",
+		tick_ms,
+		{"tick": tick_ms},
+		"agents=%d" % agent_count
+	)
 
 
 func debug_summary() -> String:
@@ -177,6 +207,9 @@ func _refresh_population() -> void:
 	_agents = keep
 	agent_count = _agents.size()
 
+	# Drop settled/occupied marks that fell far behind the player.
+	_prune_cell_marks(player_world, drop_r, config.fauna_cell_size)
+
 	if agent_count >= config.fauna_max_agents:
 		return
 
@@ -185,16 +218,34 @@ func _refresh_population() -> void:
 	var max_cx: int = floori((player_world.x + sim_r) / cell)
 	var min_cz: int = floori((player_world.z - sim_r) / cell)
 	var max_cz: int = floori((player_world.z + sim_r) / cell)
+	# Restart the scan when the lattice window moves.
+	if (
+		min_cx != _scan_min_cx or max_cx != _scan_max_cx
+		or min_cz != _scan_min_cz or max_cz != _scan_max_cz
+	):
+		_scan_min_cx = min_cx
+		_scan_max_cx = max_cx
+		_scan_min_cz = min_cz
+		_scan_max_cz = max_cz
+		_scan_cx = min_cx
+		_scan_cz = min_cz
+
 	var wild: Array[FaunaCatalog.FaunaSpec] = FaunaCatalog.wilderness_specs()
 	assert(not wild.is_empty(), "No wilderness fauna specs loaded")
 	var livestock: Array[FaunaCatalog.FaunaSpec] = FaunaCatalog.livestock_specs()
 
-	for cz in range(min_cz, max_cz + 1):
-		for cx in range(min_cx, max_cx + 1):
+	var started: int = Time.get_ticks_usec()
+	while _scan_cz <= _scan_max_cz:
+		while _scan_cx <= _scan_max_cx:
 			if agent_count >= config.fauna_max_agents:
 				return
+			if Time.get_ticks_usec() - started >= REFRESH_BUDGET_USEC:
+				return
+			var cx: int = _scan_cx
+			var cz: int = _scan_cz
+			_scan_cx += 1
 			var key: Vector2i = Vector2i(cx, cz)
-			if _occupied_cells.has(key):
+			if _occupied_cells.has(key) or _settled_cells.has(key):
 				continue
 			var center_x: float = (float(cx) + 0.5) * cell
 			var center_z: float = (float(cz) + 0.5) * cell
@@ -203,6 +254,7 @@ func _refresh_population() -> void:
 				continue
 			var chunk: Vector2i = WorldCoords.chunk_of(config, center_x, center_z)
 			if streamer == null or not bool(streamer.call("is_chunk_ready", chunk)):
+				# Chunk not ready yet — leave unsettled so a later slice can retry.
 				continue
 			var sector: WorldSector = _sector_at(center_x, center_z)
 			if sector == null:
@@ -214,6 +266,41 @@ func _refresh_population() -> void:
 			):
 				pool = livestock
 			_try_spawn_cell(key, center_x, center_z, sector, pool)
+			if Time.get_ticks_usec() - started >= REFRESH_BUDGET_USEC:
+				return
+		_scan_cx = _scan_min_cx
+		_scan_cz += 1
+	# Full window scanned; park the cursor until the window moves.
+	_scan_cx = _scan_min_cx
+	_scan_cz = _scan_min_cz
+
+
+func _prune_cell_marks(player_world: Vector3, drop_r: float, cell: float) -> void:
+	var doomed: Array[Vector2i] = []
+	for key_variant in _settled_cells.keys():
+		var key: Vector2i = key_variant
+		var x: float = (float(key.x) + 0.5) * cell
+		var z: float = (float(key.y) + 0.5) * cell
+		if Vector2(x - player_world.x, z - player_world.z).length() > drop_r:
+			doomed.append(key)
+	for key in doomed:
+		_settled_cells.erase(key)
+	doomed.clear()
+	for key_variant in _occupied_cells.keys():
+		var key: Vector2i = key_variant
+		var still: bool = false
+		for agent in _agents:
+			if agent.home_cell == key:
+				still = true
+				break
+		if still:
+			continue
+		var x: float = (float(key.x) + 0.5) * cell
+		var z: float = (float(key.y) + 0.5) * cell
+		if Vector2(x - player_world.x, z - player_world.z).length() > drop_r:
+			doomed.append(key)
+	for key in doomed:
+		_occupied_cells.erase(key)
 
 
 func _try_spawn_cell(
@@ -241,10 +328,12 @@ func _try_spawn_cell(
 			best_score = score
 			best_spec = wild[i]
 	if total <= 0.0 or best_spec == null:
+		_settled_cells[cell_key] = true
 		return
 	# Occupancy roll — denser habitat cells are more likely to host a group.
 	var occupancy: float = clampf(total / float(wild.size()), 0.0, 0.85)
 	if rng.randf() > occupancy:
+		_settled_cells[cell_key] = true
 		return
 
 	var pick: float = rng.randf() * total
@@ -261,20 +350,29 @@ func _try_spawn_cell(
 		jitter_x = world_x
 		jitter_z = world_z
 		if not HabitatQuery.may_stand(chosen, sector, continental, jitter_x, jitter_z):
+			_settled_cells[cell_key] = true
 			return
 
 	var flock: int = _next_flock_id
 	_next_flock_id += 1
 	var count: int = rng.randi_range(chosen.flock_min, chosen.flock_max)
 	count = mini(count, config.fauna_max_agents - agent_count)
+	var spawned_any: bool = false
 	for i in count:
 		var ox: float = jitter_x + rng.randf_range(-3.5, 3.5) * float(i)
 		var oz: float = jitter_z + rng.randf_range(-3.5, 3.5) * float(i)
 		if not HabitatQuery.may_stand(chosen, sector, continental, ox, oz):
 			ox = jitter_x
 			oz = jitter_z
+		var before: int = agent_count
 		_spawn_agent(chosen, flock, ox, oz, rng.randf() * TAU, cell_key)
-	_occupied_cells[cell_key] = true
+		if agent_count > before:
+			spawned_any = true
+	# Whether the physics ray found ground or not, do not re-roll this cell every
+	# half-second — that was the ~1 Hz multi-hundred-ms hitch while moving.
+	_settled_cells[cell_key] = true
+	if spawned_any:
+		_occupied_cells[cell_key] = true
 
 
 func _spawn_agent(

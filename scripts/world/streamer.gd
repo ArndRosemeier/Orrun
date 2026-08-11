@@ -1,6 +1,8 @@
 class_name Streamer
 extends Node3D
 ## Keeps the world around the player built, in the background.
+
+const _HitchLog: GDScript = preload("res://scripts/core/hitch_log.gd")
 ##
 ## Order of operations per frame:
 ##   1. rebase the floating origin if the player has wandered too far
@@ -10,8 +12,8 @@ extends Node3D
 ##   5. instantiate a small number of finished chunks
 ##   6. drop chunks that fell outside the ring
 ##
-## Only step 5 touches the SceneTree, and it is budgeted, so generation cost
-## never lands on a single frame.
+## Only step 5 touches the SceneTree, and it is budgeted (with a per-frame
+## collision-install cap). Sector/page/chunk generation runs on workers.
 ##
 ## There is no world boundary. A chunk exists if the atlas has land authority
 ## where it is, and it is owned by exactly one sector - 8 km is exactly 125
@@ -29,9 +31,19 @@ var _queue: GenQueue
 var _chunks: Dictionary = {}
 var _pending_chunks: Dictionary = {}
 var _regions: Dictionary = {}
+var _pending_regions: Dictionary = {}
+## Chunks that could not be queued yet (sector/page not ready). Retried when a
+## sector/page publishes, not every frame.
+var _blocked_chunks: Dictionary = {}
+var _blocked_retry_cursor: int = 0
+var _chunks_since_retarget: int = 0
 var _ready_results: Array[ChunkJob] = []
+## ChunkNodes waiting to install deferred concave collision (one soup per frame).
+var _collision_deferred: Array[ChunkNode] = []
 var _prop_specs: Array[PropPlacer.PropSpec] = []
 var _clutter_specs: Array[GroundClutter.Spec] = []
+## Soft cap for one blocked-chunk retry slice (microseconds).
+const BLOCKED_RETRY_BUDGET_USEC: int = 1500
 
 var _terrain_material: Material
 var _water_material: Material
@@ -75,6 +87,12 @@ var stat_chunks_cancelled: int = 0
 ## config never install.
 var mesh_epoch: int = 0
 
+## Last Streamer._process cost (ms) and phase breakdown for the HUD / hitch log.
+var stat_frame_ms: float = 0.0
+var stat_install_ms: float = 0.0
+var stat_installed_this_frame: int = 0
+var stat_last_frame_parts: Dictionary = {}
+
 
 func setup(
 	world_context: WorldContext,
@@ -103,29 +121,89 @@ func setup(
 func _process(_delta: float) -> void:
 	if sectors == null:
 		return
+	_HitchLog.ensure_open()
+	var frame_t0: int = Time.get_ticks_usec()
+	var parts: Dictionary = {}
+
+	var t0: int = Time.get_ticks_usec()
 	_maybe_rebase()
+	parts["rebase"] = (Time.get_ticks_usec() - t0) * 0.001
+
+	var sectors_before: int = sectors.stat_generated
+	t0 = Time.get_ticks_usec()
 	sectors.pump()
+	parts["sectors_pump"] = (Time.get_ticks_usec() - t0) * 0.001
+	var sector_publishes: int = sectors.stat_generated - sectors_before
 
 	var world_pos: Vector3 = WorldOrigin.to_world(_player.global_position)
 	var sector: Vector2i = WorldCoords.sector_of(world_pos.x, world_pos.z)
-	if sector != _last_sector:
+	var sector_changed: bool = sector != _last_sector
+	if sector_changed:
 		_last_sector = sector
 		sectors.request_around(sector)
 		# A sector change invalidates nothing that is already built, but it does
 		# mean pages from an evicted sector must not be handed to new chunks.
+		t0 = Time.get_ticks_usec()
 		_forget_stale_regions()
+		parts["forget_regions"] = (Time.get_ticks_usec() - t0) * 0.001
 
 	var center: Vector2i = WorldCoords.chunk_of(config, world_pos.x, world_pos.z)
-	if center != _last_center:
+	var center_changed: bool = center != _last_center
+	if center_changed:
 		_last_center = center
-	# Re-run every frame rather than only on a chunk change: the ring may have
-	# been unable to queue work last time because a sector was still baking.
-	_refresh_desired(center)
 
+	t0 = Time.get_ticks_usec()
 	_maybe_refresh_far(Vector2(world_pos.x, world_pos.z))
+	parts["far_queue"] = (Time.get_ticks_usec() - t0) * 0.001
+
+	t0 = Time.get_ticks_usec()
 	_queue.pump()
-	_collect()
-	_instantiate_budgeted()
+	parts["queue_pump"] = (Time.get_ticks_usec() - t0) * 0.001
+
+	t0 = Time.get_ticks_usec()
+	var collect_stats: Dictionary = _collect()
+	parts["collect"] = (Time.get_ticks_usec() - t0) * 0.001
+	parts["far_apply"] = float(collect_stats.get("far_apply_ms", 0.0))
+	parts["region_collect"] = float(collect_stats.get("region_ms", 0.0))
+	var region_publishes: int = int(collect_stats.get("regions_ready", 0))
+
+	# Refresh after collect so a page that finished this frame can enqueue chunks.
+	t0 = Time.get_ticks_usec()
+	_refresh_desired(center, center_changed, sector_publishes, region_publishes)
+	parts["refresh_desired"] = (Time.get_ticks_usec() - t0) * 0.001
+
+	t0 = Time.get_ticks_usec()
+	var install_stats: Dictionary = _instantiate_budgeted()
+	parts["instantiate"] = (Time.get_ticks_usec() - t0) * 0.001
+	parts["install_terrain"] = float(install_stats.get("terrain_ms", 0.0))
+	parts["install_water"] = float(install_stats.get("water_ms", 0.0))
+	parts["install_bridges"] = float(install_stats.get("bridges_ms", 0.0))
+	parts["install_props"] = float(install_stats.get("props_ms", 0.0))
+
+	t0 = Time.get_ticks_usec()
+	parts["deferred_collision"] = _install_one_deferred_collision()
+	parts["instantiate"] = float(parts["instantiate"]) + float(parts["deferred_collision"])
+
+	stat_frame_ms = (Time.get_ticks_usec() - frame_t0) * 0.001
+	stat_install_ms = float(parts["instantiate"])
+	stat_installed_this_frame = int(install_stats.get("count", 0))
+	stat_last_frame_parts = parts
+
+	var note: String = "live=%d ready=%d queue=%d wait_sector=%d installed=%d center_chg=%s sector_chg=%s sec_pub=%d reg_pub=%d blocked=%d" % [
+		stat_chunks_live,
+		_ready_results.size(),
+		queue_depth(),
+		stat_chunks_waiting_on_sector,
+		stat_installed_this_frame,
+		str(center_changed),
+		str(sector_changed),
+		sector_publishes,
+		region_publishes,
+		_blocked_chunks.size(),
+	]
+	if int(install_stats.get("collision_faces", 0)) > 0:
+		note += " coll_faces=%d" % int(install_stats["collision_faces"])
+	_HitchLog.record("streamer", stat_frame_ms, parts, note)
 
 
 # --- floating origin ----------------------------------------------------------
@@ -173,43 +251,104 @@ func _maybe_refresh_far(at: Vector2) -> void:
 
 # --- ring management ------------------------------------------------------------
 
-func _refresh_desired(center: Vector2i) -> void:
+func _refresh_desired(
+	center: Vector2i,
+	center_changed: bool,
+	sector_publishes: int,
+	region_publishes: int
+) -> void:
 	var max_radius: int = config.lod_radius[config.lod_radius.size() - 1]
 	var drop_radius: int = max_radius + config.unload_hysteresis
 	var waiting: int = 0
 
-	for dz in range(-max_radius, max_radius + 1):
-		for dx in range(-max_radius, max_radius + 1):
-			var chunk: Vector2i = center + Vector2i(dx, dz)
-			var ring: int = maxi(absi(dx), absi(dz))
-			var lod: int = _lod_for_ring(ring)
-			if lod < 0:
-				continue
-
-			var key: int = WorldCoords.chunk_key(chunk)
-			if _chunks.has(key):
-				var existing: ChunkNode = _chunks[key]
-				if existing.lod == lod:
+	if center_changed:
+		# Full ring scan only when the focus chunk moves (or on first frame).
+		for dz in range(-max_radius, max_radius + 1):
+			for dx in range(-max_radius, max_radius + 1):
+				var chunk: Vector2i = center + Vector2i(dx, dz)
+				var ring: int = maxi(absi(dx), absi(dz))
+				var lod: int = _lod_for_ring(ring)
+				if lod < 0:
 					continue
-				# Detail changed: rebuild at the new LOD, keep showing the old
-				# mesh until the replacement is ready so nothing blinks out.
-			if not _queue_chunk(chunk, lod, float(ring)):
-				waiting += 1
+
+				var key: int = WorldCoords.chunk_key(chunk)
+				if _chunks.has(key):
+					var existing: ChunkNode = _chunks[key]
+					if existing.lod == lod:
+						_blocked_chunks.erase(key)
+						continue
+					# Detail changed: rebuild at the new LOD, keep showing the old
+					# mesh until the replacement is ready so nothing blinks out.
+				if not _queue_chunk(chunk, lod, float(ring)):
+					waiting += 1
+		_prune_blocked(center, drop_radius)
+		_unload_outside(center, drop_radius)
+		# Cancel + retarget are O(waiting). At sprint speeds the waiting queue
+		# can be hundreds of jobs; do both every few chunk crossings only.
+		_chunks_since_retarget += 1
+		if _chunks_since_retarget >= 3:
+			_chunks_since_retarget = 0
+			_cancel_outside(center, drop_radius)
+			var focus_region: Vector2i = WorldCoords.region_of_chunk(config, center)
+			_queue.retarget_waiting(
+				func(job: GenQueue.Job) -> void:
+					if job is ChunkJob:
+						var c: Vector2i = (job as ChunkJob).chunk
+						job.priority = float(maxi(absi(c.x - center.x), absi(c.y - center.y)))
+					elif job is RegionJob:
+						var r: Vector2i = (job as RegionJob).region
+						job.priority = (
+							float(maxi(absi(r.x - focus_region.x), absi(r.y - focus_region.y)))
+							- 0.5
+						)
+					elif job is FarTerrainJob:
+						job.priority = 10000.0
+			)
+			_ready_results.sort_custom(
+				func(a: ChunkJob, b: ChunkJob) -> bool: return a.priority < b.priority
+			)
+	elif sector_publishes > 0 or region_publishes > 0:
+		# Only retry when something blocked chunks were waiting on has arrived.
+		waiting = _retry_blocked(center)
+	else:
+		waiting = _blocked_chunks.size()
 
 	stat_chunks_waiting_on_sector = waiting
-	_unload_outside(center, drop_radius)
-	_cancel_outside(center, drop_radius)
-	_queue.retarget_waiting(
-		func(job: GenQueue.Job) -> void:
-			if job is ChunkJob:
-				var c: Vector2i = (job as ChunkJob).chunk
-				job.priority = float(maxi(absi(c.x - center.x), absi(c.y - center.y)))
-			elif job is FarTerrainJob:
-				job.priority = 10000.0
-	)
-	_ready_results.sort_custom(
-		func(a: ChunkJob, b: ChunkJob) -> bool: return a.priority < b.priority
-	)
+
+
+func _retry_blocked(center: Vector2i) -> int:
+	if _blocked_chunks.is_empty():
+		return 0
+	var keys: Array = _blocked_chunks.keys()
+	var n: int = keys.size()
+	var waiting: int = 0
+	var started: int = Time.get_ticks_usec()
+	var examined: int = 0
+	while examined < n and Time.get_ticks_usec() - started < BLOCKED_RETRY_BUDGET_USEC:
+		var idx: int = (_blocked_retry_cursor + examined) % n
+		var key: int = keys[idx]
+		var entry: Dictionary = _blocked_chunks[key]
+		var chunk: Vector2i = entry["chunk"]
+		var lod: int = int(entry["lod"])
+		var ring: float = float(maxi(absi(chunk.x - center.x), absi(chunk.y - center.y)))
+		if not _queue_chunk(chunk, lod, ring):
+			waiting += 1
+		examined += 1
+	_blocked_retry_cursor = (_blocked_retry_cursor + examined) % maxi(n, 1)
+	# Count still-blocked after this slice.
+	return _blocked_chunks.size()
+
+
+func _prune_blocked(center: Vector2i, drop_radius: int) -> void:
+	var doomed: Array[int] = []
+	for key_variant in _blocked_chunks.keys():
+		var key: int = key_variant
+		var chunk: Vector2i = _blocked_chunks[key]["chunk"]
+		var ring: int = maxi(absi(chunk.x - center.x), absi(chunk.y - center.y))
+		if ring > drop_radius:
+			doomed.append(key)
+	for key in doomed:
+		_blocked_chunks.erase(key)
 
 
 func _lod_for_ring(ring: int) -> int:
@@ -220,27 +359,59 @@ func _lod_for_ring(ring: int) -> int:
 
 
 ## Returns false when the chunk could not be queued yet because its sector is
-## still baking. The caller counts those rather than meshing a guess.
+## still baking. The caller counts those rather than meshing a guess. Waiting on
+## a region page still returns true — work is already in flight.
 func _queue_chunk(chunk: Vector2i, lod: int, priority: float) -> bool:
 	var key: int = WorldCoords.chunk_key(chunk)
 	if _pending_chunks.has(key):
+		_blocked_chunks.erase(key)
 		return true
 
 	var sector_coord: Vector2i = WorldCoords.sector_of_chunk(config, chunk)
 	if not context.sector_in_atlas(sector_coord):
 		# Off the edge of the continent there is no authority for climate or
 		# coast, so there is nothing to mesh.
+		_blocked_chunks.erase(key)
 		return true
+
+	# Fast path: still waiting on the same sector/page — do not rebuild the
+	# blocked entry or re-request the sector on every center step.
+	if _blocked_chunks.has(key) and int(_blocked_chunks[key]["lod"]) == lod:
+		var sector_fast: WorldSector = sectors.get_sector(sector_coord)
+		if sector_fast == null:
+			_blocked_chunks[key]["priority"] = priority
+			return false
+		var region_fast: RegionData = _region_or_request(sector_fast, WorldCoords.region_of_chunk(config, chunk), priority)
+		if region_fast == null:
+			_blocked_chunks[key]["priority"] = priority
+			return true
+		return _enqueue_chunk_job(key, chunk, lod, priority, sector_fast, region_fast)
+
 	var sector: WorldSector = sectors.get_sector(sector_coord)
 	if sector == null:
 		sectors.request(sector_coord, priority)
+		_blocked_chunks[key] = {"chunk": chunk, "lod": lod, "priority": priority}
 		return false
 
 	# Page first, always: a chunk may only read hydrology and roads that were
 	# resolved for the whole page, never invent its own.
 	var region_coord: Vector2i = WorldCoords.region_of_chunk(config, chunk)
-	var region: RegionData = _ensure_region(sector, region_coord)
+	var region: RegionData = _region_or_request(sector, region_coord, priority)
+	if region == null:
+		_blocked_chunks[key] = {"chunk": chunk, "lod": lod, "priority": priority}
+		return true
 
+	return _enqueue_chunk_job(key, chunk, lod, priority, sector, region)
+
+
+func _enqueue_chunk_job(
+	key: int,
+	chunk: Vector2i,
+	lod: int,
+	priority: float,
+	sector: WorldSector,
+	region: RegionData
+) -> bool:
 	var job: ChunkJob = ChunkJob.new()
 	job.config = config
 	job.context = context
@@ -256,19 +427,29 @@ func _queue_chunk(chunk: Vector2i, lod: int, priority: float) -> bool:
 	job.priority = priority
 	job.mesh_epoch = mesh_epoch
 	_pending_chunks[key] = true
+	_blocked_chunks.erase(key)
 	_queue.enqueue(job)
 	return true
 
 
-func _ensure_region(sector: WorldSector, region_coord: Vector2i) -> RegionData:
+## Returns a ready page, or null after ensuring a [RegionJob] is queued.
+func _region_or_request(
+	sector: WorldSector, region_coord: Vector2i, priority: float
+) -> RegionData:
 	var key: int = WorldCoords.region_key(region_coord)
 	if _regions.has(key):
 		return _regions[key]
-	# Pages are cheap and must exist before their chunks, so they are built
-	# inline rather than racing the chunk queue.
-	var data: RegionData = RegionData.build(sector, region_coord)
-	_regions[key] = data
-	return data
+	if _pending_regions.has(key):
+		return null
+	var job: RegionJob = RegionJob.new()
+	job.sector = sector
+	job.region = region_coord
+	# Slightly ahead of the chunk that needed it.
+	job.priority = priority - 0.5
+	job.mesh_epoch = mesh_epoch
+	_pending_regions[key] = true
+	_queue.enqueue(job)
+	return null
 
 
 ## Pages belong to a sector. When a sector is evicted its pages must go too, or
@@ -284,6 +465,7 @@ func _forget_stale_regions() -> void:
 			doomed.append(key)
 	for key in doomed:
 		_regions.erase(key)
+		_pending_regions.erase(key)
 
 
 func _unload_outside(center: Vector2i, drop_radius: int) -> void:
@@ -298,6 +480,7 @@ func _unload_outside(center: Vector2i, drop_radius: int) -> void:
 	for key in doomed:
 		var node: ChunkNode = _chunks[key]
 		_chunks.erase(key)
+		_collision_deferred.erase(node)
 		node.queue_free()
 	stat_chunks_live = _chunks.size()
 
@@ -325,23 +508,58 @@ func _cancel_outside(center: Vector2i, drop_radius: int) -> void:
 
 # --- results ---------------------------------------------------------------------
 
-func _collect() -> void:
+func _collect() -> Dictionary:
+	var far_apply_ms: float = 0.0
+	var region_ms: float = 0.0
+	var regions_ready: int = 0
 	for job in _queue.collect():
 		if job is FarTerrainJob:
 			var far_job: FarTerrainJob = job
 			_far_pending = false
 			if far_job.mesh_epoch != mesh_epoch:
 				continue
+			var t0: int = Time.get_ticks_usec()
 			_far_terrain.apply(far_job.result)
+			far_apply_ms += (Time.get_ticks_usec() - t0) * 0.001
+			continue
+		if job is RegionJob:
+			var region_job: RegionJob = job
+			var region_key: int = WorldCoords.region_key(region_job.region)
+			_pending_regions.erase(region_key)
+			if region_job.mesh_epoch != mesh_epoch or region_job.result == null:
+				continue
+			var owner: Vector2i = WorldCoords.sector_of(
+				region_job.result.rect.position.x + 1.0,
+				region_job.result.rect.position.y + 1.0
+			)
+			if not sectors.has_sector(owner):
+				continue
+			var t1: int = Time.get_ticks_usec()
+			_regions[region_key] = region_job.result
+			region_ms += (Time.get_ticks_usec() - t1) * 0.001
+			regions_ready += 1
 			continue
 		var chunk_job: ChunkJob = job as ChunkJob
 		if chunk_job.mesh_epoch != mesh_epoch:
 			_pending_chunks.erase(WorldCoords.chunk_key(chunk_job.chunk))
 			continue
 		_ready_results.append(chunk_job)
+	return {
+		"far_apply_ms": far_apply_ms,
+		"region_ms": region_ms,
+		"regions_ready": regions_ready,
+	}
 
 
-func _instantiate_budgeted() -> void:
+func _instantiate_budgeted() -> Dictionary:
+	var stats: Dictionary = {
+		"count": 0,
+		"terrain_ms": 0.0,
+		"water_ms": 0.0,
+		"bridges_ms": 0.0,
+		"props_ms": 0.0,
+		"collision_faces": 0,
+	}
 	var drop_radius: int = (
 		config.lod_radius[config.lod_radius.size() - 1] + config.unload_hysteresis
 	)
@@ -358,32 +576,65 @@ func _instantiate_budgeted() -> void:
 			config.instantiate_budget_burst,
 			config.instantiate_budget + near_ready
 		)
-	while budget > 0 and not _ready_results.is_empty():
-		var job: ChunkJob = _ready_results.pop_front()
-		_pending_chunks.erase(WorldCoords.chunk_key(job.chunk))
+	var index: int = 0
+	while budget > 0 and index < _ready_results.size():
+		var job: ChunkJob = _ready_results[index]
 		var ring: int = maxi(
 			absi(job.chunk.x - _last_center.x), absi(job.chunk.y - _last_center.y)
 		)
 		# Finished, but the player has moved on. Building the nodes only to drop
 		# them next frame spends the frame budget that the ground ahead needs.
 		if ring > drop_radius:
+			_ready_results.remove_at(index)
+			_pending_chunks.erase(WorldCoords.chunk_key(job.chunk))
 			continue
-		_install(job)
+		_ready_results.remove_at(index)
+		_pending_chunks.erase(WorldCoords.chunk_key(job.chunk))
+		# Keep collision immediate underfoot; defer farther LOD0 so installs stay light.
+		var defer_collision: bool = job.want_collision and ring > 1
+		var apply_stats: Dictionary = _install(job, defer_collision)
+		stats["count"] = int(stats["count"]) + 1
+		stats["terrain_ms"] = float(stats["terrain_ms"]) + float(apply_stats.get("terrain_ms", 0.0))
+		stats["water_ms"] = float(stats["water_ms"]) + float(apply_stats.get("water_ms", 0.0))
+		stats["bridges_ms"] = float(stats["bridges_ms"]) + float(apply_stats.get("bridges_ms", 0.0))
+		stats["props_ms"] = float(stats["props_ms"]) + float(apply_stats.get("props_ms", 0.0))
+		stats["collision_faces"] = (
+			int(stats["collision_faces"]) + int(apply_stats.get("collision_faces", 0))
+		)
 		budget -= 1
+	return stats
 
 
-func _install(job: ChunkJob) -> void:
+func _install_one_deferred_collision() -> float:
+	while not _collision_deferred.is_empty():
+		var node: ChunkNode = _collision_deferred[0]
+		if not is_instance_valid(node) or not node.has_deferred_collision():
+			_collision_deferred.remove_at(0)
+			continue
+		var ms: float = node.install_deferred_collision()
+		if not node.has_deferred_collision():
+			_collision_deferred.remove_at(0)
+		return ms
+	return 0.0
+
+
+func _install(job: ChunkJob, defer_collision: bool) -> Dictionary:
 	var key: int = WorldCoords.chunk_key(job.chunk)
 	if _chunks.has(key):
 		var old: ChunkNode = _chunks[key]
 		_chunks.erase(key)
+		_collision_deferred.erase(old)
 		old.queue_free()
 
 	var node: ChunkNode = ChunkNode.new()
 	add_child(node)
-	node.apply(job, _terrain_material, _water_material)
+	var apply_stats: Dictionary = node.apply(
+		job, _terrain_material, _water_material, defer_collision
+	)
 	node.set_water_visible(water_visible)
 	_chunks[key] = node
+	if bool(apply_stats.get("deferred_collision", false)):
+		_collision_deferred.append(node)
 
 	stat_chunks_live = _chunks.size()
 	stat_last_build_ms = job.build_ms
@@ -399,6 +650,7 @@ func _install(job: ChunkJob) -> void:
 	if not _announced_first:
 		_announced_first = true
 		first_chunk_ready.emit(job.chunk)
+	return apply_stats
 
 
 # --- queries -----------------------------------------------------------------------
@@ -430,11 +682,14 @@ func rebake_interpretation() -> void:
 		node.queue_free()
 	_chunks.clear()
 	_pending_chunks.clear()
+	_blocked_chunks.clear()
 	_ready_results.clear()
+	_collision_deferred.clear()
 	_regions.clear()
+	_pending_regions.clear()
 	_queue.drop_waiting(
 		func(job: GenQueue.Job) -> bool:
-			return job is ChunkJob or job is FarTerrainJob
+			return job is ChunkJob or job is FarTerrainJob or job is RegionJob
 	)
 	_far_pending = false
 	if _far_terrain != null:

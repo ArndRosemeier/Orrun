@@ -2,6 +2,8 @@ extends Control
 ## Streaming and world state, so problems are visible while walking rather than
 ## only in a test run.
 
+const _HitchLog: GDScript = preload("res://scripts/core/hitch_log.gd")
+
 var streamer: Streamer
 var sectors: SectorManager
 var player: Node3D
@@ -93,6 +95,14 @@ func _process(_delta: float) -> void:
 			streamer.stat_last_water_ms,
 			streamer.stat_last_dress_ms,
 			streamer.stat_worst_contract_error,
+		]
+	)
+	lines.append(
+		"streamer frame %.1f ms  install %.1f ms x%d   %s" % [
+			streamer.stat_frame_ms,
+			streamer.stat_install_ms,
+			streamer.stat_installed_this_frame,
+			_HitchLog.summary_line(),
 		]
 	)
 	if fauna_sim != null:

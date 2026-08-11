@@ -11,22 +11,69 @@ var triangle_count: int = 0
 
 var _terrain: MeshInstance3D
 var _water: MeshInstance3D
-var _body: StaticBody3D
+## Terrain + bridge collision soups deferred to a later frame.
+var _deferred_collision_faces: Array[PackedVector3Array] = []
 
 
-func apply(job: ChunkJob, terrain_material: Material, water_material: Material) -> void:
+## Builds scene nodes. Returns phase timings in milliseconds for hitch logging.
+## When [param defer_collision] is true, concave collision is staged for
+## [method install_deferred_collision] so mesh can appear without a hitch.
+func apply(
+	job: ChunkJob,
+	terrain_material: Material,
+	water_material: Material,
+	defer_collision: bool = false
+) -> Dictionary:
 	chunk = job.chunk
 	lod = job.lod
 	max_contract_error = job.max_contract_error
 	var origin: Vector2 = WorldCoords.chunk_origin(job.config, job.chunk)
 	world_origin = Vector3(origin.x, 0.0, origin.y)
 	name = "Chunk_%d_%d" % [chunk.x, chunk.y]
+	_deferred_collision_faces.clear()
 
-	_build_terrain(job, terrain_material)
+	var t0: int = Time.get_ticks_usec()
+	var collision_faces: int = _build_terrain(job, terrain_material, defer_collision)
+	var terrain_ms: float = (Time.get_ticks_usec() - t0) * 0.001
+
+	t0 = Time.get_ticks_usec()
 	_build_water(job, water_material)
-	_build_bridges(job, terrain_material, origin)
+	var water_ms: float = (Time.get_ticks_usec() - t0) * 0.001
+
+	t0 = Time.get_ticks_usec()
+	_build_bridges(job, terrain_material, defer_collision)
+	var bridges_ms: float = (Time.get_ticks_usec() - t0) * 0.001
+
+	t0 = Time.get_ticks_usec()
 	_build_props(job)
+	var props_ms: float = (Time.get_ticks_usec() - t0) * 0.001
+
 	refresh_transform()
+	return {
+		"terrain_ms": terrain_ms,
+		"water_ms": water_ms,
+		"bridges_ms": bridges_ms,
+		"props_ms": props_ms,
+		"collision_faces": collision_faces,
+		"deferred_collision": defer_collision and not _deferred_collision_faces.is_empty(),
+		"want_collision": job.want_collision,
+		"lod": job.lod,
+		"chunk": job.chunk,
+	}
+
+
+func has_deferred_collision() -> bool:
+	return not _deferred_collision_faces.is_empty()
+
+
+## Installs one deferred concave shape. Returns milliseconds spent.
+func install_deferred_collision() -> float:
+	if _deferred_collision_faces.is_empty():
+		return 0.0
+	var t0: int = Time.get_ticks_usec()
+	var faces: PackedVector3Array = _deferred_collision_faces.pop_front()
+	_add_faces_collision(faces)
+	return (Time.get_ticks_usec() - t0) * 0.001
 
 
 func refresh_transform() -> void:
@@ -40,10 +87,11 @@ func set_water_visible(visible_state: bool) -> void:
 		_water.visible = visible_state
 
 
-func _build_terrain(job: ChunkJob, material: Material) -> void:
+## Returns the number of terrain collision face vertices (installed or deferred).
+func _build_terrain(job: ChunkJob, material: Material, defer_collision: bool) -> int:
 	var data: MeshExtract.MeshData = job.mesh_data
 	if data.is_empty():
-		return
+		return 0
 	triangle_count = data.indices.size() / 3
 
 	var arrays: Array = []
@@ -67,14 +115,13 @@ func _build_terrain(job: ChunkJob, material: Material) -> void:
 	)
 	add_child(_terrain)
 
-	if not data.collision_faces.is_empty():
-		var shape: ConcavePolygonShape3D = ConcavePolygonShape3D.new()
-		shape.set_faces(data.collision_faces)
-		var collider: CollisionShape3D = CollisionShape3D.new()
-		collider.shape = shape
-		_body = StaticBody3D.new()
-		_body.add_child(collider)
-		add_child(_body)
+	if data.collision_faces.is_empty():
+		return 0
+	if defer_collision:
+		_deferred_collision_faces.append(data.collision_faces)
+	else:
+		_add_faces_collision(data.collision_faces)
+	return data.collision_faces.size()
 
 
 func _build_water(job: ChunkJob, material: Material) -> void:
@@ -99,28 +146,37 @@ func _build_water(job: ChunkJob, material: Material) -> void:
 	add_child(_water)
 
 
-func _build_bridges(job: ChunkJob, material: Material, origin: Vector2) -> void:
-	for site in job.bridges:
-		var built: BridgeBuilder.BuildResult = BridgeBuilder.build(site, origin)
-
+func _build_bridges(job: ChunkJob, material: Material, defer_collision: bool) -> void:
+	for built in job.bridge_builds:
 		if built.uses_kit:
 			_add_bridge_multimesh(built.mid_mesh, built.mid_transforms)
 			_add_bridge_multimesh(built.end_mesh, built.end_transforms)
-			if job.want_collision:
-				_add_bridge_kit_collision(built)
 
-		if built.procedural_mesh != null:
-			built.procedural_mesh.surface_set_material(0, material)
+		if built.has_procedural_mesh():
+			var mesh: ArrayMesh = ArrayMesh.new()
+			var arrays: Array = []
+			arrays.resize(Mesh.ARRAY_MAX)
+			arrays[Mesh.ARRAY_VERTEX] = built.procedural_vertices
+			arrays[Mesh.ARRAY_NORMAL] = built.procedural_normals
+			arrays[Mesh.ARRAY_COLOR] = built.procedural_colors
+			arrays[Mesh.ARRAY_INDEX] = built.procedural_indices
+			mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+			mesh.surface_set_material(0, material)
 			var instance: MeshInstance3D = MeshInstance3D.new()
-			instance.mesh = built.procedural_mesh
+			instance.mesh = mesh
 			add_child(instance)
-			if job.want_collision:
-				_add_mesh_collision(built.procedural_mesh)
+
+		if built.collision_faces.is_empty():
+			continue
+		if defer_collision:
+			_deferred_collision_faces.append(built.collision_faces)
+		else:
+			_add_faces_collision(built.collision_faces)
 
 
-func _add_mesh_collision(mesh: ArrayMesh) -> void:
+func _add_faces_collision(faces: PackedVector3Array) -> void:
 	var shape: ConcavePolygonShape3D = ConcavePolygonShape3D.new()
-	shape.set_faces(mesh.get_faces())
+	shape.set_faces(faces)
 	var collider: CollisionShape3D = CollisionShape3D.new()
 	collider.shape = shape
 	var body: StaticBody3D = StaticBody3D.new()
@@ -141,27 +197,6 @@ func _add_bridge_multimesh(mesh: Mesh, transforms: Array[Transform3D]) -> void:
 	kit_instance.multimesh = multimesh
 	kit_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	add_child(kit_instance)
-
-
-func _add_bridge_kit_collision(built: BridgeBuilder.BuildResult) -> void:
-	var st: SurfaceTool = SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	_append_bridge_collision(st, built.mid_mesh, built.mid_transforms)
-	_append_bridge_collision(st, built.end_mesh, built.end_transforms)
-	var baked: ArrayMesh = st.commit()
-	if baked.get_surface_count() == 0:
-		return
-	_add_mesh_collision(baked)
-
-
-func _append_bridge_collision(
-	st: SurfaceTool, mesh: Mesh, transforms: Array[Transform3D]
-) -> void:
-	if mesh == null:
-		return
-	for xform in transforms:
-		for surface_i in mesh.get_surface_count():
-			st.append_from(mesh, surface_i, xform)
 
 
 func _build_props(job: ChunkJob) -> void:
