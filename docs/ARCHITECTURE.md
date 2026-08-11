@@ -2,8 +2,10 @@
 
 Orrun generates a seeded fantasy continent and streams it around the player.
 Everything you can walk on is derived, in a fixed order, from one integer seed.
-Nothing is authored by hand and nothing is saved: the same seed always rebuilds
-the same world.
+Nothing is authored by hand: the same seed always rebuilds the same world.
+Boot may reload derived blobs from `user://cache/` (atlas, sectors, underfoot
+LOD0 chunks); that is a performance cache only, keyed and versioned so a
+mismatch regenerates. See [`BAKE_CACHE.md`](BAKE_CACHE.md).
 
 The world has no boundary you can reach. It is as large as the atlas says the
 continent is — 256 km square at the runtime default, 1000 km at the design

@@ -1,0 +1,20 @@
+---
+description: Bump BakeCache format versions when packed layouts or bake outputs change
+alwaysApply: true
+---
+
+# Bake cache versioning
+
+Disk caches live in `user://cache/` via [`scripts/world/bake_cache.gd`](scripts/world/bake_cache.gd). Full policy: [`docs/BAKE_CACHE.md`](docs/BAKE_CACHE.md).
+
+When changing **packed binary layout** or **what a bake produces**, you must invalidate old blobs. Do **not** load incompatible cache bytes. Do **not** add silent migration/fallbacks unless the user explicitly asks.
+
+| Change | Bump / update |
+|--------|----------------|
+| Atlas or sector pack fields/order/types | `BakeCache.FORMAT_VERSION` |
+| LOD0 chunk pack (mesh/water/props/bridges) | `BakeCache.CHUNK_FORMAT_VERSION` |
+| Atlas generator meaning / cell contract | `ContinentAtlas.SCHEMA_VERSION` |
+| New config knobs that change sector/atlas content | `WorldConfig.content_hash()` |
+| New knobs that change mesh/density only | `WorldConfig.mesh_content_hash()` |
+
+Mismatch behaviour (already implemented): warn → cache miss → regenerate. Keep it that way.

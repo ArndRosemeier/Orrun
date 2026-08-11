@@ -908,6 +908,12 @@ func _index_road(road: RoadEdge) -> void:
 		road_index.insert_segment(a.x, a.z, b.x, b.z, road.id * 65536 + i)
 
 
+## Rebuild the road spatial index after loading from [BakeCache].
+func rebuild_spatial_index() -> void:
+	road_index = SpatialIndex2D.new(160.0)
+	_index_roads()
+
+
 ## Drape settlement hollow-ways as local trail-tier edges after the plan grows.
 func append_settlement_lanes(
 	polylines: Array[PackedVector2Array], half_width: float = 1.8

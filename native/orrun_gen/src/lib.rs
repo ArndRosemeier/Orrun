@@ -1,6 +1,7 @@
 use godot::prelude::*;
 
 mod atlas_landmask;
+mod columns;
 mod fields;
 mod fill_window;
 mod flood;
@@ -256,6 +257,83 @@ impl OrrunGen {
 		)
 	}
 
+	/// Column density: carves + biome + post-passes. Macro/hydro grids are pre-sampled in GDScript.
+	///
+	/// [param grids] is 10×count floats, channel-major:
+	/// height, amp, moisture, temperature, shore_d, atlas_plane, lake_edge_d,
+	/// lake_surface, drainage_z, lake_surface_near.
+	/// Tile CSR packs are [param tile_starts] (34 ints: 17 river + 17 road) and
+	/// [param tile_indices] (river indices then road indices, split by [param river_index_count]).
+	#[func]
+	fn build_columns(
+		&self,
+		grids: PackedFloat32Array,
+		rivers: PackedFloat32Array,
+		roads: PackedFloat32Array,
+		tile_starts: PackedInt32Array,
+		tile_indices: PackedInt32Array,
+		river_index_count: i32,
+		fords: PackedVector3Array,
+		bridge_grades: PackedFloat32Array,
+		params: Dictionary<Variant, Variant>,
+	) -> Dictionary<Variant, Variant> {
+		let get_i = |key: &str| -> i32 { params.get_or_nil(key).to::<i64>() as i32 };
+		let get_f = |key: &str| -> f32 { params.get_or_nil(key).to::<f32>() };
+		let samples_h = get_i("samples_h");
+		const STARTS_LEN: usize = 17; // TILE_DIVISIONS^2 + 1
+		assert_eq!(tile_starts.len(), STARTS_LEN * 2);
+		assert!(river_index_count >= 0);
+		let river_n = river_index_count as usize;
+		assert!(tile_indices.len() >= river_n);
+
+		let mut river_starts_v = vec![0i32; STARTS_LEN];
+		let mut road_starts_v = vec![0i32; STARTS_LEN];
+		for i in 0..STARTS_LEN {
+			river_starts_v[i] = tile_starts[i];
+			road_starts_v[i] = tile_starts[STARTS_LEN + i];
+		}
+		let river_starts = PackedInt32Array::from(river_starts_v);
+		let road_starts = PackedInt32Array::from(road_starts_v);
+		let mut river_indices_v = vec![0i32; river_n];
+		for i in 0..river_n {
+			river_indices_v[i] = tile_indices[i];
+		}
+		let river_indices = PackedInt32Array::from(river_indices_v);
+		let road_n = tile_indices.len() - river_n;
+		let mut road_indices_v = vec![0i32; road_n];
+		for i in 0..road_n {
+			road_indices_v[i] = tile_indices[river_n + i];
+		}
+		let road_indices = PackedInt32Array::from(road_indices_v);
+
+		columns::build_columns(
+			grids,
+			rivers,
+			roads,
+			river_starts,
+			river_indices,
+			road_starts,
+			road_indices,
+			fords,
+			bridge_grades,
+			columns::ColumnParams {
+				samples_h,
+				voxel: get_f("voxel"),
+				origin_x: get_f("origin_x"),
+				origin_z: get_f("origin_z"),
+				tile_span: get_f("tile_span"),
+				corridor_inner: get_f("corridor_inner"),
+				corridor_outer: get_f("corridor_outer"),
+				macro_cell_size: get_f("macro_cell_size"),
+				relief_amp_mountains: get_f("relief_amp_mountains"),
+				relief_amp_plains: get_f("relief_amp_plains"),
+				overhang_amount: get_f("overhang_amount"),
+				seed_relief: get_i("seed_relief"),
+				seed_relief_fine: get_i("seed_relief_fine"),
+			},
+		)
+	}
+
 	/// 3D density volume from column surfaces. Returns values + origin_y + samples_y.
 	#[func]
 	fn build_volume(
@@ -299,6 +377,6 @@ impl OrrunGen {
 
 	#[func]
 	fn version(&self) -> GString {
-		GString::from("orrun_gen 0.3.0 (mesh+volume+fill+atlas+roads)")
+		GString::from("orrun_gen 0.4.0 (mesh+volume+columns+fill+atlas+roads)")
 	}
 }

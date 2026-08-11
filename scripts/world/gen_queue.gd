@@ -100,8 +100,12 @@ func drop_waiting(should_drop: Callable) -> Array[Job]:
 
 
 ## Blocks until every dispatched job has finished. Only used on shutdown.
+## Each task id must be waited exactly once ([method collect] already waits
+## completed jobs and removes them from [_running]).
 func drain() -> void:
 	for job in _running:
-		WorkerThreadPool.wait_for_task_completion(job.task_id)
+		if job.task_id >= 0:
+			WorkerThreadPool.wait_for_task_completion(job.task_id)
+			job.task_id = -1
 	_running.clear()
 	_waiting.clear()

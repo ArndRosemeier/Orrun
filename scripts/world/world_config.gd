@@ -197,9 +197,9 @@ extends Resource
 # --- Streaming -----------------------------------------------------------------------
 
 ## Chunk results instantiated per frame on the main thread (floor).
-@export var instantiate_budget: int = 3
+@export var instantiate_budget: int = 4
 ## Extra installs per frame when near chunks are ready (capped).
-@export var instantiate_budget_burst: int = 5
+@export var instantiate_budget_burst: int = 8
 ## Player distance from the scene origin (m) that triggers an origin rebase.
 @export var origin_rebase_distance: float = 512.0
 ## Sectors kept in the LRU cache. 9 is the 3x3 the player can reach without a
@@ -216,7 +216,9 @@ extends Resource
 @export var prop_max_slope_deg: float = 34.0
 ## Chebyshev chunk rings that still place trees/rocks (LOD0 only).
 @export var props_max_ring: int = 3
-## Dense grass tufts — expensive; keep to the player's immediate ring.
+## Dense grass tufts — expensive; first painted only inside this Chebyshev ring.
+## Chunks meshed farther out are remeshed when the player walks in so grass is
+## not permanently missing outside the original spawn neighbourhood.
 @export var clutter_max_ring: int = 1
 
 # --- Fauna ----------------------------------------------------------------------------
@@ -279,6 +281,8 @@ func voxel_size_for_lod(lod: int) -> float:
 
 ## Stable fingerprint of every value that changes generated content. Combined
 ## with the atlas content hash it keys any derived on-disk cache.
+## When adding a knob that changes atlas or sector bake output, append it here
+## (see docs/BAKE_CACHE.md).
 func content_hash() -> int:
 	var parts: PackedFloat64Array = PackedFloat64Array([
 		float(seed), macro_cell_size, chunk_size, sector_halo_metres,
@@ -299,6 +303,40 @@ func content_hash() -> int:
 		meander_amplitude, meander_scale, float(trunk_order_base),
 		road_width_primary, road_width_secondary, road_width_trail,
 		ford_max_width, float(local_node_count),
+	])
+	var h: int = 1469598103934665603
+	for value in parts:
+		h = (h ^ hash(value)) * 1099511628211
+		h = h & 0x7FFFFFFFFFFFFFFF
+	return h
+
+
+## Fingerprint of knobs that change LOD0 mesh/collision without changing the
+## sector bake. Combined with [method WorldContext.content_key] for chunk blobs.
+## When adding a density/mesh/prop knob that changes chunk output, append it
+## here (see docs/BAKE_CACHE.md). Layout changes also bump
+## [constant BakeCache.CHUNK_FORMAT_VERSION].
+func mesh_content_hash() -> int:
+	var lod0_voxel: float = lod_voxel_size[0] if lod_voxel_size.size() > 0 else 0.0
+	var parts: PackedFloat64Array = PackedFloat64Array([
+		lod0_voxel,
+		1.0 if skirts_enabled else 0.0,
+		1.0 if cave_enabled else 0.0,
+		cave_top_depth,
+		cave_bottom_depth,
+		cave_scale,
+		cave_threshold,
+		cave_water_clearance,
+		float(cave_max_lod),
+		1.0 if props_enabled else 0.0,
+		float(props_max_ring),
+		float(clutter_max_ring),
+		overhang_amount,
+		overhang_scale,
+		surface_band,
+		world_floor,
+		world_ceiling,
+		vertical_margin,
 	])
 	var h: int = 1469598103934665603
 	for value in parts:

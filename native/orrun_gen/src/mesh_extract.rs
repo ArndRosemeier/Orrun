@@ -185,7 +185,9 @@ pub fn build(
 	want_collision: bool,
 	want_skirts: bool,
 ) -> Dictionary<Variant, Variant> {
-	let values = values.to_vec();
+	// Borrow the packed storage directly — no full-volume clone.
+	let values: &[f32] = values.as_slice();
+	assert_eq!(values.len(), (dims_x * dims_y * dims_z) as usize);
 	let cells_x = dims_x - 1;
 	let cells_y = dims_y - 1;
 	let cells_z = dims_z - 1;
@@ -199,15 +201,29 @@ pub fn build(
 	let mut min_v = Vector3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
 	let mut max_v = Vector3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
 
+	const DEEP_SLAB: f32 = 1.0e5;
+
 	for cz in 0..cells_z {
 		for cy in 0..cells_y {
 			for cx in 0..cells_x {
+				// Cheap reject for deep SOLID/AIR cells: opposite corners same sign
+				// and far from the isosurface → no edge crossings possible.
+				let c0 = sample(values, dims_x, dims_y, dims_z, cx, cy, cz);
+				let c7 = sample(values, dims_x, dims_y, dims_z, cx + 1, cy + 1, cz + 1);
+				if c0.abs() > DEEP_SLAB && c7.abs() > DEEP_SLAB && (c0 < 0.0) == (c7 < 0.0) {
+					continue;
+				}
+
 				let mut corner = [0.0f32; 8];
 				let mut negative = 0;
-				for c in 0..8 {
+				corner[0] = c0;
+				if c0 < 0.0 {
+					negative += 1;
+				}
+				for c in 1..8 {
 					let o = CORNER_OFFSET[c];
 					let v = sample(
-						&values,
+						values,
 						dims_x,
 						dims_y,
 						dims_z,
@@ -445,10 +461,13 @@ pub fn build(
 		}
 	}
 
+	// Collision uses the walkable surface only. Skirt tris exist for visual seam
+	// hiding and must not inflate ConcavePolygonShape3D install cost.
 	let collision = if want_collision {
-		let mut faces = Vec::with_capacity(indices.len());
-		for &i in &indices {
-			faces.push(vertices[i as usize]);
+		let surface_index_count = (surface_triangles as usize) * 3;
+		let mut faces = Vec::with_capacity(surface_index_count);
+		for i in 0..surface_index_count {
+			faces.push(vertices[indices[i] as usize]);
 		}
 		PackedVector3Array::from(faces)
 	} else {

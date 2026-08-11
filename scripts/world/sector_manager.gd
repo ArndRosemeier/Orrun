@@ -145,4 +145,8 @@ func _evict() -> void:
 
 
 func shutdown() -> void:
+	# Drop not-yet-started bakes; join anything already on a worker so exit
+	# cannot tear down while SectorJob / OrrunGen is still running.
+	_queue.drop_waiting(func(_job: GenQueue.Job) -> bool: return true)
+	_pending.clear()
 	_queue.drain()

@@ -47,6 +47,17 @@ func add(
 	return claim
 
 
+## Rebuild the claim spatial index after loading from [BakeCache].
+func rebuild_spatial_index() -> void:
+	_index = SpatialIndex2D.new(256.0)
+	for claim in claims:
+		_index.insert_segment(
+			claim.center.x - claim.radius, claim.center.y - claim.radius,
+			claim.center.x + claim.radius, claim.center.y + claim.radius,
+			claim.id
+		)
+
+
 func claims_in_rect(rect: Rect2) -> Array[Claim]:
 	var out: Array[Claim] = []
 	for id in _index.query_rect(rect):

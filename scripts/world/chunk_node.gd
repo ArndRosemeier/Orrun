@@ -11,6 +11,10 @@ var triangle_count: int = 0
 ## True once at least one walkable collider is in the tree. Mesh-only (deferred
 ## collision or LOD>0) chunks must not be treated as spawnable ground.
 var walk_collision_ready: bool = false
+## Whether this install ran ground clutter (grass). LOD0 chunks first built
+## outside [member WorldConfig.clutter_max_ring] are upgraded when the player
+## walks in — otherwise grass only exists under the original spawn.
+var has_clutter: bool = false
 
 var _terrain: MeshInstance3D
 var _water: MeshInstance3D
@@ -30,6 +34,7 @@ func apply(
 	chunk = job.chunk
 	lod = job.lod
 	max_contract_error = job.max_contract_error
+	has_clutter = job.want_clutter
 	var origin: Vector2 = WorldCoords.chunk_origin(job.config, job.chunk)
 	world_origin = Vector3(origin.x, 0.0, origin.y)
 	name = "Chunk_%d_%d" % [chunk.x, chunk.y]

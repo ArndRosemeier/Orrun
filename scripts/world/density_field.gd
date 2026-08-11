@@ -73,6 +73,11 @@ const BRIDGE_GRADE_STRIDE: int = 10
 const BRIDGE_CONTACT_RADIUS: float = 5.5
 ## Max |surface - deck_z| allowed at abutments after density build.
 const BRIDGE_FLUSH_EPSILON: float = 0.05
+## Finite stand-in for dry water markers across the OrrunGen FFI. Godot
+## PackedFloat32Array does not reliably round-trip ±INF into Rust.
+const NO_WATER_FFI: float = -1.0e20
+const NO_WATER_FFI_THRESH: float = -1.0e19
+const NO_CLEARANCE_FFI: float = 1.0e20
 
 
 class Field extends RefCounted:
@@ -114,6 +119,9 @@ class Field extends RefCounted:
 	## Wet columns whose bed is not strictly below the sheet.
 	var wet_columns_failing_clearance: int = 0
 	var wet_columns: int = 0
+	## Timing split for the HUD (filled by [method DensityField.build]).
+	var columns_ms: int = 0
+	var volume_ms: int = 0
 
 	func sample_index(ix: int, iy: int, iz: int) -> int:
 		return (iz * dims.y + iy) * dims.x + ix
@@ -163,11 +171,23 @@ static func build(
 		roads, WorldSector.ROAD_STRIDE, origin_x, origin_z, tile_span, influence
 	)
 
+	assert(ClassDB.class_exists("OrrunGen"), "OrrunGen missing — rebuild addons/orrun_gen")
+	var gen: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
+	var t_cols: int = Time.get_ticks_msec()
 	_build_columns(
 		cfg, sector, continental, noise, field, samples_h, origin_x, origin_z,
-		rivers, roads, river_tiles, road_tiles, tile_span, fords, bridge_grades
+		rivers, roads, river_tiles, road_tiles, tile_span, fords, bridge_grades, gen
 	)
-	_build_volume(cfg, noise, field, samples_h, origin_x, origin_z)
+	field.columns_ms = Time.get_ticks_msec() - t_cols
+	var t_vol: int = Time.get_ticks_msec()
+	_build_volume(cfg, noise, field, samples_h, origin_x, origin_z, gen)
+	field.volume_ms = Time.get_ticks_msec() - t_vol
+	# Translate FFI dry markers to -INF for the rest of the game.
+	for i in field.water_top.size():
+		if field.water_top[i] <= NO_WATER_FFI_THRESH:
+			field.water_top[i] = -INF
+	if field.min_water_clearance >= NO_CLEARANCE_FFI * 0.5:
+		field.min_water_clearance = INF
 	return field
 
 
@@ -180,11 +200,23 @@ static func _max_influence(cfg: WorldConfig) -> float:
 
 # --- Column pass (2D) -----------------------------------------------------------
 
+static func _flatten_tiles(tiles: Array[PackedInt32Array]) -> Dictionary:
+	var starts: PackedInt32Array = PackedInt32Array()
+	var indices: PackedInt32Array = PackedInt32Array()
+	starts.resize(tiles.size() + 1)
+	for t in tiles.size():
+		starts[t] = indices.size()
+		for si in tiles[t]:
+			indices.append(int(si))
+	starts[tiles.size()] = indices.size()
+	return {"starts": starts, "indices": indices}
+
+
 static func _build_columns(
 	cfg: WorldConfig,
 	sector: WorldSector,
 	continental: ContinentalTerrain,
-	noise: NoiseSet,
+	_noise: NoiseSet,
 	field: Field,
 	samples_h: int,
 	origin_x: float,
@@ -195,392 +227,154 @@ static func _build_columns(
 	road_tiles: Array[PackedInt32Array],
 	tile_span: float,
 	fords: PackedVector3Array,
-	bridge_grades: PackedFloat32Array
+	bridge_grades: PackedFloat32Array,
+	gen: RefCounted
 ) -> void:
 	var count: int = samples_h * samples_h
 	field.has_water = false
 	field.max_contract_error = 0.0
-	field.min_water_clearance = INF
+	field.min_water_clearance = NO_CLEARANCE_FFI
 	field.wet_columns_failing_clearance = 0
 	field.wet_columns = 0
-	field.surface_z = PackedFloat32Array()
-	field.surface_z.resize(count)
-	field.corridor_mask = PackedFloat32Array()
-	field.corridor_mask.resize(count)
-	field.wetness = PackedFloat32Array()
-	field.wetness.resize(count)
-	field.roadness = PackedFloat32Array()
-	field.roadness.resize(count)
-	field.biome = PackedByteArray()
-	field.biome.resize(count)
-	field.temperature = PackedFloat32Array()
-	field.temperature.resize(count)
-	field.ground_color = PackedColorArray()
-	field.ground_color.resize(count)
-	field.overhang_amp = PackedFloat32Array()
-	field.overhang_amp.resize(count)
-	field.contract_error = PackedFloat32Array()
-	field.contract_error.resize(count)
-	field.water_top = PackedFloat32Array()
-	field.water_top.resize(count)
 
 	var terrain: MacroTerrain = sector.terrain
 	var hydro: Hydrology = sector.hydro
 	var voxel: float = field.voxel
-	var worst_error: float = 0.0
-	## Per-column distance to river centreline / LOD wet half — used by the
-	## bridge-suppression pass after the main carve.
-	var river_dist: PackedFloat32Array = PackedFloat32Array()
-	river_dist.resize(count)
-	var wet_half_of: PackedFloat32Array = PackedFloat32Array()
-	wet_half_of.resize(count)
+
+	# Pre-sample macro/hydro grids (cheap); carves + segment scans run in Rust.
+	var height: PackedFloat32Array = PackedFloat32Array()
+	var amp: PackedFloat32Array = PackedFloat32Array()
+	var moisture: PackedFloat32Array = PackedFloat32Array()
+	var temperature: PackedFloat32Array = PackedFloat32Array()
+	var shore_d: PackedFloat32Array = PackedFloat32Array()
+	var atlas_plane: PackedFloat32Array = PackedFloat32Array()
+	var lake_edge_d: PackedFloat32Array = PackedFloat32Array()
+	var lake_surface: PackedFloat32Array = PackedFloat32Array()
+	var drainage_z: PackedFloat32Array = PackedFloat32Array()
+	var lake_surface_near: PackedFloat32Array = PackedFloat32Array()
+	height.resize(count)
+	amp.resize(count)
+	moisture.resize(count)
+	temperature.resize(count)
+	shore_d.resize(count)
+	atlas_plane.resize(count)
+	lake_edge_d.resize(count)
+	lake_surface.resize(count)
+	drainage_z.resize(count)
+	lake_surface_near.resize(count)
 
 	for iz in samples_h:
 		var wz: float = origin_z + float(iz) * voxel
-		var tile_z: int = clampi(int((wz - origin_z) / tile_span), 0, TILE_DIVISIONS - 1)
 		for ix in samples_h:
 			var wx: float = origin_x + float(ix) * voxel
-			var tile_x: int = clampi(int((wx - origin_x) / tile_span), 0, TILE_DIVISIONS - 1)
-			var tile: int = tile_z * TILE_DIVISIONS + tile_x
-
-			var height: float = terrain.height_at(wx, wz)
-			var amp: float = terrain.relief_amp_at(wx, wz)
-			var moisture: float = terrain.moisture_at(wx, wz)
-			var temperature: float = terrain.temperature_at(wx, wz)
-			var biome: int = BiomeTable.classify(moisture, temperature, height, amp)
-			var tint: Color = BiomeTable.ground_color(moisture, temperature, height, amp)
-			amp *= BiomeTable.relief_scale(biome)
-
-			# --- nearest channel -------------------------------------------------
-			var river_d: float = INF
-			var river_edge_d: float = INF
-			var river_water_z: float = -INF
-			var river_depth: float = 0.0
-			var river_valley: float = 1.0
-			var river_half: float = 0.0
-			for si in river_tiles[tile]:
-				var base: int = si
-				var ax: float = rivers[base]
-				var ay: float = rivers[base + 1]
-				var az: float = rivers[base + 2]
-				var bx: float = rivers[base + 3]
-				var by: float = rivers[base + 4]
-				var bz: float = rivers[base + 5]
-				var t: float = _segment_param(wx, wz, ax, az, bx, bz)
-				var px: float = ax + (bx - ax) * t
-				var pz: float = az + (bz - az) * t
-				var d: float = sqrt((wx - px) * (wx - px) + (wz - pz) * (wz - pz))
-				if d >= river_d:
-					continue
-				river_d = d
-				river_half = lerpf(rivers[base + 6], rivers[base + 7], t)
-				river_water_z = ay + (by - ay) * t
-				river_depth = rivers[base + 8]
-				river_valley = rivers[base + 9]
-				river_edge_d = d - river_half
-
-			# --- nearest road ----------------------------------------------------
-			var road_d: float = INF
-			var road_edge_d: float = INF
-			var road_z: float = 0.0
-			var road_half: float = 0.0
-			for si in road_tiles[tile]:
-				var base: int = si
-				var ax: float = roads[base]
-				var ay: float = roads[base + 1]
-				var az: float = roads[base + 2]
-				var bx: float = roads[base + 3]
-				var by: float = roads[base + 4]
-				var bz: float = roads[base + 5]
-				var t: float = _segment_param(wx, wz, ax, az, bx, bz)
-				var px: float = ax + (bx - ax) * t
-				var pz: float = az + (bz - az) * t
-				var d: float = sqrt((wx - px) * (wx - px) + (wz - pz) * (wz - pz))
-				if d >= road_d:
-					continue
-				road_d = d
-				road_half = roads[base + 6]
-				road_z = ay + (by - ay) * t
-				road_edge_d = d - road_half
-
-			# --- local lake --------------------------------------------------------
-			# Full sheet only on flood-fill members. A looser "below spill +
-			# drainage above land" test within two macro cells also matched
-			# neighbouring slopes and valleys under the spill elevation, which
-			# painted a floating pane metres above dry ground and through trees.
-			# Shore skirt: only shallow inundation next to the mask.
-			var lake_edge_d: float = hydro.lake_distance_at(wx, wz)
-			var lake_surface: float = -INF
+			var index: int = iz * samples_h + ix
+			height[index] = terrain.height_at(wx, wz)
+			amp[index] = terrain.relief_amp_at(wx, wz)
+			moisture[index] = terrain.moisture_at(wx, wz)
+			temperature[index] = terrain.temperature_at(wx, wz)
+			shore_d[index] = continental.shore_distance(wx, wz)
+			atlas_plane[index] = continental.water_plane_at(wx, wz)
+			lake_edge_d[index] = hydro.lake_distance_at(wx, wz)
 			var lake_id_here: int = hydro.lake_at(wx, wz)
+			var ls: float = NO_WATER_FFI
 			if lake_id_here >= 0:
-				lake_surface = hydro.lakes[lake_id_here].surface_z
-			elif lake_edge_d <= cfg.macro_cell_size * LAKE_SHORE_BAND_CELLS:
+				ls = hydro.lakes[lake_id_here].surface_z
+			elif lake_edge_d[index] <= cfg.macro_cell_size * LAKE_SHORE_BAND_CELLS:
 				var flat: float = hydro.lake_surface_near_at(wx, wz)
 				if (
 					flat > -INF
-					and height < flat
-					and flat - height <= LAKE_SHORE_MAX_INUNDATION
-					and hydro.drainage_at(wx, wz) > height
+					and height[index] < flat
+					and flat - height[index] <= LAKE_SHORE_MAX_INUNDATION
+					and hydro.drainage_at(wx, wz) > height[index]
 				):
-					lake_surface = flat
+					ls = flat
+			lake_surface[index] = ls
+			drainage_z[index] = hydro.drainage_at(wx, wz)
+			var near_ls: float = hydro.lake_surface_near_at(wx, wz)
+			lake_surface_near[index] = near_ls if near_ls > -INF else NO_WATER_FFI
 
-			# --- ocean and atlas lakes -----------------------------------------------
-			# Not a per-sector decision at all: the waterline is the zero of the
-			# global signed shoreline function, and its height is the nearest
-			# atlas body's own surface. Two sectors sharing a coast read the same
-			# function at the same metres, so the shore cannot step at a seam.
-			# Plane is sampled on land too — estuary blend needs it inland of the
-			# waterline, where shore_d is still positive.
-			var shore_d: float = continental.shore_distance(wx, wz)
-			var atlas_plane: float = continental.water_plane_at(wx, wz)
-			var atlas_surface: float = atlas_plane if shore_d <= 0.0 else -INF
-
-			# --- corridor mask: the drainage-surface contract ---------------------
-			var nearest_wet: float = minf(river_edge_d, lake_edge_d)
-			nearest_wet = minf(nearest_wet, maxf(shore_d, 0.0))
-			var nearest_feature: float = minf(nearest_wet, road_edge_d)
-			var mask: float = smoothstep(cfg.corridor_inner, cfg.corridor_outer, nearest_feature)
-
-			var relief: float = _relief_value(noise, wx, wz, amp, cfg.relief_amp_mountains)
-			var surface: float = height + relief * amp * mask
-
-			# --- carve: river bed and banks ---------------------------------------
-			var wet: float = 0.0
-			var water_top: float = -INF
-			# Contract reference: the water surface this column must sit BELOW.
-			# Banks are legitimately above water, so only submerged ground counts.
-			var submerged_z: float = -INF
-			# Coarse LOD voxels are wider than a brook. Authorship must reach at
-			# least ~0.9·voxel from the centreline or every sample lands on a
-			# bank, water_top stays -INF, and the mesh chords ground over the slot
-			# — especially on steep grades where the valley is a thin trench.
-			var sample_wet_half: float = maxf(river_half, voxel * 0.9)
-			if river_d < sample_wet_half + river_valley:
-				var depth: float = river_depth * _ford_relief(fords, wx, wz)
-				# Sheet height from the draped polyline:
-				#   - never above the local continental bed (no floating canal)
-				#   - never far below a believable bed (no slot canyon LOD bridges)
-				#   - but DO NOT ride up onto a macro chord that bridges the valley
-				#     (height ≫ polyline water): that puts a thin sheet on a land
-				#     bridge and reads as ground creeping over the river.
-				# Estuary: only pull a HIGH sheet down toward the atlas plane.
-				# Never raise water to meet the sea — that floated a canal over
-				# a low bed. Dry land is floored at sea level so rivers should
-				# already arrive at or above the ocean.
-				var river_sheet: float = river_water_z
-				if shore_d < ESTUARY_BLEND_METRES and river_sheet > atlas_plane:
-					var estuary_t: float = (
-						1.0 if shore_d <= 0.0
-						else 1.0 - clampf(shore_d / ESTUARY_BLEND_METRES, 0.0, 1.0)
-					)
-					river_sheet = lerpf(river_sheet, atlas_plane, estuary_t)
-				var draped: float = minf(river_sheet, height)
-				if height > river_sheet + MAX_CHORD_BURY * CHORD_BREAK_FACTOR:
-					draped = river_sheet
-				else:
-					draped = maxf(draped, height - MAX_CHORD_BURY)
-				var channel_water: float = draped - WATER_FREEBOARD
-				# Sea-level coastal plain + full trunk depth → a carved lagoon.
-				# Shallower beds on the shelf keep the mouth a river, not a pond.
-				if shore_d < COASTAL_BED_BLEND_METRES and height < atlas_plane + 10.0:
-					var coast_t: float = (
-						1.0 if shore_d <= 0.0
-						else 1.0 - clampf(shore_d / COASTAL_BED_BLEND_METRES, 0.0, 1.0)
-					)
-					var shelf_t: float = 1.0 - clampf(
-						(height - atlas_plane) / 10.0, 0.0, 1.0
-					)
-					var shallow: float = coast_t * shelf_t
-					var depth_cap: float = lerpf(
-						depth, COASTAL_BED_MAX_BELOW_PLANE, shallow
-					)
-					depth = minf(depth, depth_cap)
-				if river_d <= sample_wet_half:
-					var across: float = river_d / maxf(sample_wet_half, 0.001)
-					# Elliptical bed, but never pinch to zero at the banks. A bed
-					# that meets the waterline leaves surface_z == water_top and
-					# the water mesh drops the column as dry, which reads as the
-					# ground creeping over the river.
-					var profile: float = sqrt(maxf(1.0 - across * across, 0.0))
-					profile = maxf(profile, 0.4)
-					var bed: float = (
-						channel_water - maxf(depth * profile, MIN_BED_CLEARANCE)
-					)
-					if shore_d < COASTAL_BED_BLEND_METRES and height < atlas_plane + 10.0:
-						bed = maxf(bed, atlas_plane - COASTAL_BED_MAX_BELOW_PLANE)
-					surface = minf(surface, bed)
-					submerged_z = channel_water
-					# Channel (plus LOD pad) carries water. Claiming the whole
-					# valley would paint the river across every lower thing in
-					# it, including the lake it is about to join.
-					water_top = channel_water
-				else:
-					var ramp: float = smoothstep(
-						0.0, river_valley, river_d - sample_wet_half
-					)
-					# The bank starts just above the water rather than at it.
-					# Blending to the water line instead leaves a wide apron of
-					# ground within centimetres of the surface, which floods as
-					# a shallow pan and reads as foam rather than as a river.
-					surface = minf(
-						surface, lerpf(channel_water + BANK_RISE, surface, ramp)
-					)
-				wet = 1.0 - smoothstep(0.0, sample_wet_half + 12.0, river_d)
-
-			# --- carve: lake basin --------------------------------------------------
-			# The basin already exists in the macro terrain, so this only has to
-			# stop detail poking through: anything the drainage says is under
-			# water is forced below that lake's own surface. Only cells the flood
-			# actually claimed are carved; the shore band merely reports where
-			# the water would be if the ground were low enough.
-			if lake_surface > -INF:
-				# The bed is the macro basin itself, only nudged below the water
-				# line. Flattening it to a fixed depth would turn every lake into
-				# a shallow tray and every shore into a step.
-				surface = minf(
-					surface, minf(height, lake_surface) - MIN_BED_CLEARANCE
-				)
-				water_top = maxf(water_top, lake_surface)
-				submerged_z = maxf(submerged_z, lake_surface)
-				wet = maxf(wet, smoothstep(0.0, 2.5, lake_surface - height))
-			elif (
-				lake_edge_d <= cfg.macro_cell_size * 1.25
-				and river_d <= sample_wet_half
-			):
-				# River mouth into lake: the channel already claims this column,
-				# but the shore berm often sits at/above spill so the lake test
-				# fails and the reach ends as a dry stub. Cut the berm and pin
-				# the sheet to the lake (channel-only — not the whole valley).
-				# Stay close to the mask: lake_surface_near is a chamfer between
-				# neighbouring lakes, so mid-cascade samples can look "near" a
-				# phantom spill and used to drag the whole gorge down to it.
-				var spill_near: float = hydro.lake_surface_near_at(wx, wz)
-				if spill_near > -INF and absf(river_water_z - spill_near) <= 2.0:
-					var mouth: float = spill_near - WATER_FREEBOARD
-					if water_top > -INF:
-						mouth = minf(water_top, mouth)
-					surface = minf(surface, spill_near - MIN_BED_CLEARANCE)
-					water_top = mouth
-					submerged_z = maxf(submerged_z, mouth)
-					wet = maxf(wet, 1.0)
-			elif (
-				water_top == -INF
-				and lake_edge_d <= cfg.macro_cell_size * 1.25
-				and river_d <= sample_wet_half * 1.35
-			):
-				# Drainage ponds in the gutter before the spill cell claims land.
-				var spill_near: float = hydro.lake_surface_near_at(wx, wz)
-				var drain_z: float = hydro.drainage_at(wx, wz)
-				if (
-					spill_near > -INF
-					and drain_z > height + MIN_VISIBLE_WATER_CLEARANCE
-					and absf(drain_z - spill_near) <= 2.0
-				):
-					var approach: float = minf(drain_z, spill_near) - WATER_FREEBOARD
-					approach = minf(approach, height - MIN_VISIBLE_WATER_CLEARANCE)
-					surface = minf(surface, approach - MIN_BED_CLEARANCE)
-					water_top = approach
-					submerged_z = approach
-					wet = maxf(wet, 1.0)
-
-			# --- carve: sea and atlas lake basins -------------------------------------
-			# The continental surface already sits below the plane wherever the
-			# signed shoreline says so; this only stops relief detail poking a
-			# 3 m rock through an otherwise flat sea. On atlas-wet cells the
-			# plane owns the sheet — never keep a higher river curtain.
-			if atlas_surface > -INF:
-				surface = minf(
-					surface, minf(height, atlas_surface) - MIN_BED_CLEARANCE
-				)
-				water_top = atlas_surface
-				submerged_z = atlas_surface
-				wet = maxf(wet, smoothstep(0.0, 2.5, atlas_surface - height))
-
-			var gap: float = _axial_bridge_gap(bridge_grades, wx, wz)
-
-			# --- carve: road bench ---------------------------------------------------
-			# Roads both cut and fill, which is the one carve that can raise the
-			# ground. It is clamped below any water surface here so an approach
-			# embankment can never dam a river it is supposed to ford.
-			# Deep hillside cuts used a fixed ~14 m shoulder, so surface-nets
-			# meshed a near-vertical cliff on the uphill lip. Widen the batter
-			# with cut depth so the same drop spreads laterally.
-			var roadness: float = 0.0
-			var cut_depth: float = maxf(surface - road_z, 0.0)
-			var shoulder: float = 14.0
-			if cut_depth > 0.5:
-				shoulder = minf(14.0 + cut_depth * 1.5, 56.0)
-			if road_d < road_half + shoulder + 2.0:
-				var bench: float = 1.0 - smoothstep(road_half, road_half + shoulder, road_d)
-				# Clamp the target the bench is heading for, not the result. The
-				# carve has already put the ground under the water here, so a
-				# target below the water keeps every point of the interpolation
-				# below it too. Clamping afterwards instead leaves ground above
-				# the water wherever the bench is only partly applied, and
-				# clamping afterwards at full strength drops the ground in one
-				# step at the exact metre the road's influence ends, which
-				# surface nets meshes as a wall of shards on an invisible circle.
-				var bench_z: float = road_z
-				if submerged_z > -INF:
-					bench_z = minf(road_z, submerged_z - 0.1)
-				surface = lerpf(surface, bench_z, bench * (1.0 - gap))
-				# The axial gap holds the bench back so an embankment cannot dam
-				# the channel, but the worn earth of the approach runs right up
-				# to the abutment. Cutting the dirt too leaves a bridge sitting
-				# in untouched grass with no road arriving at it.
-				roadness = 1.0 - smoothstep(road_half * 0.6, road_half + 1.6, road_d)
-
-			var error: float = 0.0
-			if water_top > -INF:
-				field.has_water = true
-				field.wet_columns += 1
-				# Same predicate WaterSurface uses to decide whether a column is
-				# wet. Measuring against submerged_z alone used to call a flush
-				# bed (surface == water) a pass, while the mesh dropped it.
-				var clearance: float = water_top - surface
-				field.min_water_clearance = minf(field.min_water_clearance, clearance)
-				var need: float = water_top - MIN_VISIBLE_WATER_CLEARANCE
-				error = maxf(surface - need, 0.0)
-				if clearance < MIN_VISIBLE_WATER_CLEARANCE:
-					field.wet_columns_failing_clearance += 1
-				worst_error = maxf(worst_error, error)
-			elif submerged_z > -INF:
-				# Bank / approach columns that must stay below a nearby water
-				# plane without carrying a sheet of their own.
-				error = maxf(surface - submerged_z, 0.0)
-				worst_error = maxf(worst_error, error)
-
-			var index: int = iz * samples_h + ix
-			field.surface_z[index] = surface
-			field.corridor_mask[index] = mask
-			field.wetness[index] = clampf(wet, 0.0, 1.0)
-			field.roadness[index] = clampf(roadness, 0.0, 1.0)
-			field.biome[index] = biome
-			field.temperature[index] = temperature
-			field.ground_color[index] = tint
-			# Overhangs are relief too, so they answer to the same corridor mask,
-			# squared: an undercut needs more clearance than a bump does. At the
-			# edge of a carved bank a half-strength overhang folds the surface
-			# back on ground that is already steep, and surface nets turn that
-			# into a fan of shards.
-			field.overhang_amp[index] = (
-				maxf(amp - cfg.relief_amp_plains, 0.0) * cfg.overhang_amount * mask * mask
-			)
-			field.contract_error[index] = error
-			field.water_top[index] = water_top
-			river_dist[index] = river_d
-			wet_half_of[index] = sample_wet_half
-
-	worst_error = _suppress_ground_over_water(
-		field, river_dist, wet_half_of, samples_h, voxel, worst_error
+	var river_flat: Dictionary = _flatten_tiles(river_tiles)
+	var road_flat: Dictionary = _flatten_tiles(road_tiles)
+	var river_starts: PackedInt32Array = river_flat["starts"]
+	var river_indices: PackedInt32Array = river_flat["indices"]
+	var road_starts: PackedInt32Array = road_flat["starts"]
+	var road_indices: PackedInt32Array = road_flat["indices"]
+	var tile_starts := PackedInt32Array()
+	tile_starts.resize(34) # 17 river starts + 17 road starts
+	for i in 17:
+		tile_starts[i] = river_starts[i]
+		tile_starts[17 + i] = road_starts[i]
+	var tile_indices := PackedInt32Array()
+	tile_indices.append_array(river_indices)
+	tile_indices.append_array(road_indices)
+	# Channel-major grids — avoid Dictionary packing of many PackedFloat32Arrays.
+	var grids := PackedFloat32Array()
+	grids.resize(count * 10)
+	for i in count:
+		grids[i] = height[i]
+		grids[count + i] = amp[i]
+		grids[count * 2 + i] = moisture[i]
+		grids[count * 3 + i] = temperature[i]
+		grids[count * 4 + i] = shore_d[i]
+		grids[count * 5 + i] = atlas_plane[i]
+		grids[count * 6 + i] = lake_edge_d[i]
+		grids[count * 7 + i] = lake_surface[i]
+		grids[count * 8 + i] = drainage_z[i]
+		grids[count * 9 + i] = lake_surface_near[i]
+	var params: Dictionary = {
+		"samples_h": samples_h,
+		"voxel": voxel,
+		"origin_x": origin_x,
+		"origin_z": origin_z,
+		"tile_span": tile_span,
+		"corridor_inner": cfg.corridor_inner,
+		"corridor_outer": cfg.corridor_outer,
+		"macro_cell_size": cfg.macro_cell_size,
+		"relief_amp_mountains": cfg.relief_amp_mountains,
+		"relief_amp_plains": cfg.relief_amp_plains,
+		"overhang_amount": cfg.overhang_amount,
+		"seed_relief": cfg.layer_seed("relief"),
+		"seed_relief_fine": cfg.layer_seed("relief_fine"),
+	}
+	var result: Dictionary = gen.call(
+		"build_columns",
+		grids,
+		rivers,
+		roads,
+		tile_starts,
+		tile_indices,
+		river_indices.size(),
+		fords,
+		bridge_grades,
+		params
 	)
-	# Bridges last: after village pads and the water seal, so nothing undoes
-	# the deck_z hard set at the abutments.
-	_apply_bridge_grades(
-		field, bridge_grades, samples_h, origin_x, origin_z, voxel
+	assert(result.has("surface_z"), "OrrunGen.build_columns returned no surface_z")
+	field.surface_z = result["surface_z"]
+	field.corridor_mask = result["corridor_mask"]
+	field.wetness = result["wetness"]
+	field.roadness = result["roadness"]
+	field.biome = result["biome"]
+	field.temperature = result["temperature"]
+	field.ground_color = result["ground_color"]
+	field.overhang_amp = result["overhang_amp"]
+	field.contract_error = result["contract_error"]
+	field.water_top = result["water_top"]
+	assert(field.surface_z.size() == count, "native columns surface_z size")
+	assert(field.water_top.size() == count, "native columns water_top size")
+	# Spot-check only — full scans were a multi-ms tax on every worker job.
+	var probe: float = field.surface_z[0]
+	assert(
+		is_finite(probe) and probe > NO_WATER_FFI_THRESH,
+		"native columns surface_z[0]=%s is not land height" % probe
 	)
-	field.max_contract_error = worst_error
-	_damp_overhangs_on_steep_ground(field, samples_h, voxel)
+	field.has_water = bool(result["has_water"])
+	field.wet_columns = int(result["wet_columns"])
+	field.wet_columns_failing_clearance = int(result["wet_columns_failing_clearance"])
+	field.min_water_clearance = float(result["min_water_clearance"])
+	field.max_contract_error = float(result["max_contract_error"])
+	field.origin = Vector3(origin_x, 0.0, origin_z)
+	field.dims = Vector3i(samples_h, 0, samples_h)
+
 
 
 ## WaterSurface extends the sheet under dry corners of a wet quad. If those
@@ -930,14 +724,10 @@ static func _build_volume(
 	field: Field,
 	samples_h: int,
 	origin_x: float,
-	origin_z: float
+	origin_z: float,
+	gen: RefCounted
 ) -> void:
-	assert(
-		ClassDB.class_exists("OrrunGen"),
-		"OrrunGen is required for DensityField volume (build native/orrun_gen)"
-	)
 	var caves: bool = cfg.cave_enabled and field.lod <= cfg.cave_max_lod
-	var native: RefCounted = ClassDB.instantiate("OrrunGen") as RefCounted
 	var params: Dictionary = {
 		"samples_h": samples_h,
 		"voxel": field.voxel,
@@ -958,7 +748,7 @@ static func _build_volume(
 		"seed_cave_b": cfg.layer_seed("cave_b"),
 		"cave_scale": cfg.cave_scale,
 	}
-	var result: Variant = native.call(
+	var result: Variant = gen.call(
 		"build_volume",
 		field.surface_z,
 		field.corridor_mask,

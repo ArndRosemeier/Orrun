@@ -165,15 +165,55 @@ static func _pick(
 	return null
 
 
-## Highest solid-to-air transition in a column: the top of an overhang if there
-## is one, otherwise the plain ground surface. Returns (height, found).
+## Ground seating height. Uses bilinear [member DensityField.Field.surface_z]
+## (O(1)) unless the column allows overhang, in which case the top solid-to-air
+## transition in the volume is used so trees can sit on lips.
+## Returns (height, found).
 static func _surface_hit(field: DensityField.Field, world_x: float, world_z: float) -> Vector2:
-	var ix: int = clampi(
-		int(round((world_x - field.origin.x) / field.voxel)), 0, field.dims.x - 1
+	var ix_f: float = (world_x - field.origin.x) / field.voxel
+	var iz_f: float = (world_z - field.origin.z) / field.voxel
+	var ix: int = clampi(int(round(ix_f)), 0, field.dims.x - 1)
+	var iz: int = clampi(int(round(iz_f)), 0, field.dims.z - 1)
+	var column: int = iz * field.dims.x + ix
+	if (
+		column >= 0 and column < field.overhang_amp.size()
+		and field.overhang_amp[column] > 0.35
+		and not field.values.is_empty()
+	):
+		return _surface_hit_volume(field, ix, iz)
+	var y: float = _sample_surface_z(field, world_x, world_z)
+	if y <= -1.0e20:
+		return Vector2(0.0, 0.0)
+	return Vector2(y, 1.0)
+
+
+static func _sample_surface_z(
+	field: DensityField.Field, world_x: float, world_z: float
+) -> float:
+	if field.surface_z.is_empty() or field.dims.x < 2 or field.dims.z < 2:
+		return -INF
+	var fx: float = clampf(
+		(world_x - field.origin.x) / field.voxel, 0.0, float(field.dims.x - 1)
 	)
-	var iz: int = clampi(
-		int(round((world_z - field.origin.z) / field.voxel)), 0, field.dims.z - 1
+	var fz: float = clampf(
+		(world_z - field.origin.z) / field.voxel, 0.0, float(field.dims.z - 1)
 	)
+	var x0: int = int(floor(fx))
+	var z0: int = int(floor(fz))
+	var x1: int = mini(x0 + 1, field.dims.x - 1)
+	var z1: int = mini(z0 + 1, field.dims.z - 1)
+	var tx: float = fx - float(x0)
+	var tz: float = fz - float(z0)
+	var s00: float = field.surface_z[z0 * field.dims.x + x0]
+	var s10: float = field.surface_z[z0 * field.dims.x + x1]
+	var s01: float = field.surface_z[z1 * field.dims.x + x0]
+	var s11: float = field.surface_z[z1 * field.dims.x + x1]
+	return lerpf(lerpf(s00, s10, tx), lerpf(s01, s11, tx), tz)
+
+
+static func _surface_hit_volume(
+	field: DensityField.Field, ix: int, iz: int
+) -> Vector2:
 	for iy in range(field.dims.y - 2, 0, -1):
 		var here: float = field.values[(iz * field.dims.y + iy) * field.dims.x + ix]
 		var above: float = field.values[(iz * field.dims.y + iy + 1) * field.dims.x + ix]
@@ -215,16 +255,21 @@ static func _surface_normal(
 	field: DensityField.Field, world_x: float, world_z: float, surface_y: float
 ) -> Vector3:
 	var step: float = field.voxel
-	var east: Vector2 = _surface_hit(field, world_x + step, world_z)
-	var west: Vector2 = _surface_hit(field, world_x - step, world_z)
-	var south: Vector2 = _surface_hit(field, world_x, world_z + step)
-	var north: Vector2 = _surface_hit(field, world_x, world_z - step)
-	var dx: float = (
-		(east.x if east.y > 0.5 else surface_y) - (west.x if west.y > 0.5 else surface_y)
-	) / (2.0 * step)
-	var dz: float = (
-		(south.x if south.y > 0.5 else surface_y) - (north.x if north.y > 0.5 else surface_y)
-	) / (2.0 * step)
+	# Gradient of surface_z — same slope as the walkable drainage surface, O(1).
+	var east_y: float = _sample_surface_z(field, world_x + step, world_z)
+	var west_y: float = _sample_surface_z(field, world_x - step, world_z)
+	var south_y: float = _sample_surface_z(field, world_x, world_z + step)
+	var north_y: float = _sample_surface_z(field, world_x, world_z - step)
+	if east_y <= -1.0e20:
+		east_y = surface_y
+	if west_y <= -1.0e20:
+		west_y = surface_y
+	if south_y <= -1.0e20:
+		south_y = surface_y
+	if north_y <= -1.0e20:
+		north_y = surface_y
+	var dx: float = (east_y - west_y) / (2.0 * step)
+	var dz: float = (south_y - north_y) / (2.0 * step)
 	return Vector3(-dx, 1.0, -dz).normalized()
 
 

@@ -1122,6 +1122,12 @@ func _index_rivers() -> void:
 			river_index.insert_segment(a.x, a.z, b.x, b.z, reach.id * 65536 + i)
 
 
+## Rebuild the river spatial index after loading from [BakeCache].
+func rebuild_spatial_index() -> void:
+	river_index = SpatialIndex2D.new(160.0)
+	_index_rivers()
+
+
 # --- Local lake proximity ------------------------------------------------------------
 
 func _build_lake_distance() -> void:

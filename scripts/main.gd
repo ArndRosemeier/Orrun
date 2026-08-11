@@ -44,6 +44,8 @@ var _boot_error: String = ""
 var _session_world: Vector3 = Vector3.ZERO
 var _session_yaw: float = 0.0
 var _session_valid: bool = false
+## WM_CLOSE_REQUEST and PREDELETE both tear down; only run once.
+var _shutdown_done: bool = false
 
 
 func _ready() -> void:
@@ -73,7 +75,15 @@ func _ready() -> void:
 
 
 func _bake_atlas() -> void:
-	var atlas: ContinentAtlas = ContinentAtlas.generate(config.seed, config.atlas_size)
+	var t0: int = Time.get_ticks_msec()
+	var atlas: ContinentAtlas = BakeCache.try_load_atlas(config)
+	if atlas != null:
+		atlas.generate_ms = Time.get_ticks_msec() - t0
+		print("BakeCache: atlas hit (%d ms, hash=%d)" % [atlas.generate_ms, atlas.content_hash])
+	else:
+		atlas = ContinentAtlas.generate(config.seed, config.atlas_size)
+		BakeCache.save_atlas(config, atlas)
+		print("BakeCache: atlas miss, generated in %d ms" % atlas.generate_ms)
 	var errors: PackedStringArray = atlas.validate()
 	if not errors.is_empty():
 		# The atlas is the authority for everything below it. A broken one must
@@ -101,7 +111,7 @@ func _bake_spawn_sector() -> void:
 	if not context.sector_in_atlas(sector_coord):
 		_boot_error = "Spawn is outside the atlas (%.0f, %.0f)" % [spawn_xz.x, spawn_xz.y]
 		return
-	spawn_sector = WorldSector.generate(context, sector_coord)
+	spawn_sector = _load_or_bake_sector(sector_coord)
 	var saved_y: float = float(spawn["y"])
 	# Fresh profile: snap onto the flattest dry plaza in the settlement claim
 	# (atlas |∇h| is 1 km; this uses macro slope so the floodplain can win).
@@ -112,7 +122,7 @@ func _bake_spawn_sector() -> void:
 			if not context.sector_in_atlas(sector_coord):
 				_boot_error = "Snapped spawn outside atlas (%.0f, %.0f)" % [spawn_xz.x, spawn_xz.y]
 				return
-			spawn_sector = WorldSector.generate(context, sector_coord)
+			spawn_sector = _load_or_bake_sector(sector_coord)
 	var ground: float = continental.height_at(spawn_xz.x, spawn_xz.y)
 	# A prior crash/teardown can persist a Y deep under the mesh. Treat that as
 	# "unknown" so the spawn ray starts from the continental surface instead.
@@ -128,6 +138,22 @@ func _bake_spawn_sector() -> void:
 		saved_y if saved_y > -INF else ground,
 		spawn_xz.y
 	)
+
+
+func _load_or_bake_sector(sector_coord: Vector2i) -> WorldSector:
+	var t0: int = Time.get_ticks_msec()
+	var cached: WorldSector = BakeCache.try_load_sector(context, sector_coord)
+	if cached != null:
+		var load_ms: int = Time.get_ticks_msec() - t0
+		cached.bake_timings = {"cache_hit": 1, "total_ms": load_ms}
+		print("BakeCache: sector %s hit (%d ms)" % [sector_coord, load_ms])
+		return cached
+	var baked: WorldSector = WorldSector.generate(context, sector_coord)
+	BakeCache.save_sector(context, baked)
+	print("BakeCache: sector %s miss, baked in %d ms" % [
+		sector_coord, int(baked.bake_timings.get("total_ms", 0))
+	])
+	return baked
 
 
 ## Resolve the settlement plaza with macro |∇h| ranking (same as bake).
@@ -239,6 +265,7 @@ func _on_world_ready() -> void:
 		context, sectors, player, specs, _terrain_material, _water_material,
 		clutter_specs
 	)
+	player.bind_streamer(streamer, config)
 	fauna_sim.setup(context, sectors, streamer, player)
 	hydro_map.build(sectors, player)
 	world_map.setup_for_game(context.atlas, player)
@@ -253,7 +280,9 @@ func _on_world_ready() -> void:
 
 func _try_spawn() -> void:
 	var chunk: Vector2i = WorldCoords.chunk_of(config, _spawn_world.x, _spawn_world.z)
-	if not streamer.is_chunk_ready(chunk):
+	# Wait for the underfoot chunk plus neighbours so the first step cannot
+	# walk onto mesh-only / missing ground.
+	if not streamer.is_neighborhood_ready(chunk, 1):
 		return
 
 	var scene_xz: Vector2 = WorldOrigin.to_scene_xz(_spawn_world.x, _spawn_world.z)
@@ -369,17 +398,24 @@ func _notification(what: int) -> void:
 	# Save on window close while the player is still in the tree. PREDELETE runs
 	# during teardown when global_position is already illegal — that used to
 	# write a corrupt session and the next boot could spawn under the world.
+	# Always drain worker pools before quit: GenQueue / chunk-cache tasks still
+	# running into tree teardown crash the process (see BakeCache chunk saves).
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
-		_save_session()
-		if streamer != null:
-			streamer.shutdown()
-		if sectors != null:
-			sectors.shutdown()
+		_shutdown_workers_and_session()
+		get_tree().quit()
 	elif what == NOTIFICATION_PREDELETE:
-		if streamer != null:
-			streamer.shutdown()
-		if sectors != null:
-			sectors.shutdown()
+		_shutdown_workers_and_session()
+
+
+func _shutdown_workers_and_session() -> void:
+	if _shutdown_done:
+		return
+	_shutdown_done = true
+	_save_session()
+	if streamer != null:
+		streamer.shutdown()
+	if sectors != null:
+		sectors.shutdown()
 
 
 ## Keys: xz (Vector2), y (float, -INF if unknown), yaw (float).

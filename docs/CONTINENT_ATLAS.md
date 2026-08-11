@@ -132,9 +132,12 @@ in walkable plains/hills, high codes reach Alps-scale peaks (~4 km at 255).
 Tests lock the endpoints and round-trips. Schema version bumps when this curve
 changes.
 
-**Orogens:** after the climate landmask, the generator stamps 1–2 crescent
-mountain belts (length/width scaled to atlas size) with a high core, foothill
-apron, and sparse passes so rivers can cross. Noise alone does not produce
+**Orogens (hierarchical):** after the climate landmask, the generator stamps
+**1–2 primary** crescent mountain belts (Alps-scale length, foothill half-width
+capped ~40 km) with a high core and sparse passes so rivers can cross. It then
+stamps a denser set of **secondary massifs** at fixed kilometre scales
+(~40–120 km arcs, ~8–18 km foothills, count scaling with atlas area) so a
+million‑km² continent is not a single spine. Noise alone does not produce
 Alps-like ranges.
 
 ### 4.4 Biome ids (v1 set)
@@ -144,7 +147,7 @@ Alps-like ranges.
 | 0 | `OCEAN` | Open water; continental drainage sink |
 | 1 | `COAST` | Land cell with an `OCEAN` 4-neighbour (can also be painted) |
 | 2 | `PLAINS` | |
-| 3 | `FOREST` | |
+| 3 | `FOREST` | Patchy woodlands from mid-scale humidity + canopy |
 | 4 | `WETLAND` | |
 | 5 | `ARID` | |
 | 6 | `ALPINE` | |
@@ -181,8 +184,10 @@ Rules:
   cells as a sink and may not dry the basin, flood past it, or move the outlet
   to another atlas cell.
 
-Minimum presence: a non-trivial seed should produce **some** inland lakes, not
-only ocean mouths. Tests assert that.
+Minimum presence: a non-trivial seed should produce **many** inland lakes, not
+only ocean mouths. Count scales with atlas area (~96 targets at 1000² km). Most
+are fixed-kilometre **ponds**; a rarer high tail grows into large inland basins
+(up to the atlas lake cell cap). Tests assert count, size variance, and outlets.
 
 ---
 
@@ -266,22 +271,23 @@ Road link rules:
 ### 6.4 Generation order (fixed)
 
 1. **Landmask + ocean collar** (border sea frame + continent noise).
-2. **Elevation + relief** on land (and shelf codes on ocean if useful).
-3. **Humidity** (boost near ocean; simple rain-shadow optional).
-4. **Atlas lakes** — depressions / seeds → `LAKE` cells + spill.
-5. **Biome classify** (including `COAST`, `LAKE`, `OCEAN`).
-6. **River graph** — major trunks only: flow accumulation on atlas elevation
+2. **Elevation + relief + humidity** on land (and shelf codes on ocean if useful).
+3. **Orogens** — 1–2 primary Alps belts, then secondary fixed-km massifs.
+4. **Atlas lakes** — many ponds + rare large basins → `LAKE` cells + spill.
+5. **Woodland humidity** — mid-scale moist patches / clearings (not continent FBM alone).
+6. **Biome classify** (including `COAST`, `LAKE`, `OCEAN`, patchy `FOREST`).
+7. **River graph** — major trunks only: flow accumulation on atlas elevation
    with ocean+lake sinks → create edge ports where channels cross cell borders →
    wire in-cell links → assign classes.
-7. **Population** — sparse land occupancy (0–15) from humidity, river corridors
+8. **Population** — sparse land occupancy (0–15) from humidity, river corridors
    and, strongest of all, river mouths into ocean/lake plus their immediate
    hinterland. High relief, alpine and arid land is suppressed. Ocean and lake
    cells are always 0, and most land stays 0; occupancy is peaks, not a field.
-8. **Road nodes** — sparse seeds placed after population so towns own the
+9. **Road nodes** — sparse seeds placed after population so towns own the
    spacing budget: `SETTLEMENT` on local population maxima (each populated
    landmass gets at least one), then coastal gates, lake shores, highland
    saddles and interior landmarks fill the wilderness lattice.
-9. **Road graph** — least-cost paths between nodes on atlas costs (flat, low
+10. **Road graph** — least-cost paths between nodes on atlas costs (flat, low
    relief, prefer non-ocean, cheaper through occupied cells and along river
    shoulders while still penalising the channel itself) → ports + links →
    classes. The MST and spur weights are discounted by endpoint population, so

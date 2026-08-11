@@ -22,6 +22,10 @@ var flying: bool = false
 
 var _pitch: float = 0.0
 var _gravity: float = ProjectSettings.get_setting("physics/3d/default_gravity", 22.0)
+var _streamer: Streamer = null
+var _config: WorldConfig = null
+## Probe this far ahead (metres) so a sprint cannot cross into unfinished ground.
+const _WALK_PROBE_METRES: float = 2.5
 
 
 func _ready() -> void:
@@ -29,6 +33,13 @@ func _ready() -> void:
 	floor_snap_length = 0.45
 	floor_constant_speed = true
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+func bind_streamer(streamer: Streamer, config: WorldConfig) -> void:
+	assert(streamer != null, "PlayerController.bind_streamer requires a Streamer")
+	assert(config != null, "PlayerController.bind_streamer requires a WorldConfig")
+	_streamer = streamer
+	_config = config
 
 
 func world_position() -> Vector3:
@@ -84,6 +95,11 @@ func _physics_process(delta: float) -> void:
 		move_and_slide()
 		return
 
+	# Never walk (or fall) where LOD0 walk collision is missing.
+	if not _walk_ground_ready(world_position()):
+		velocity = Vector3.ZERO
+		return
+
 	if not is_on_floor():
 		velocity.y -= _gravity * delta
 	elif Input.is_action_just_pressed("jump"):
@@ -102,4 +118,18 @@ func _physics_process(delta: float) -> void:
 	if is_on_floor() and wish.length_squared() > 0.0001:
 		velocity.y = lerpf(velocity.y, target.y, control)
 
+	if wish.length_squared() > 0.0001:
+		var probe_world: Vector3 = world_position() + wish * _WALK_PROBE_METRES
+		if not _walk_ground_ready(probe_world):
+			velocity.x = 0.0
+			velocity.z = 0.0
+			if is_on_floor():
+				velocity.y = 0.0
+
 	move_and_slide()
+
+
+func _walk_ground_ready(world_pos: Vector3) -> bool:
+	assert(_streamer != null and _config != null, "PlayerController missing streamer bind")
+	var chunk: Vector2i = WorldCoords.chunk_of(_config, world_pos.x, world_pos.z)
+	return _streamer.is_chunk_ready(chunk)

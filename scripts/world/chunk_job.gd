@@ -24,6 +24,8 @@ var want_props: bool = false
 var want_clutter: bool = false
 ## Matches [member Streamer.mesh_epoch] at enqueue; stale remeshes are dropped.
 var mesh_epoch: int = 0
+## True when mesh/props came from [BakeCache] instead of [method run].
+var from_cache: bool = false
 
 var mesh_data: MeshExtract.MeshData
 var water_data: WaterSurface.WaterData
@@ -35,9 +37,13 @@ var max_contract_error: float = 0.0
 var build_ms: int = 0
 ## Phase breakdown for the HUD (density / mesh / water / dress).
 var density_ms: int = 0
+var columns_ms: int = 0
+var volume_ms: int = 0
 var mesh_ms: int = 0
 var water_ms: int = 0
 var dress_ms: int = 0
+var props_ms: int = 0
+var clutter_ms: int = 0
 
 
 func run() -> void:
@@ -51,6 +57,8 @@ func run() -> void:
 		config, sector, continental, noise, chunk, lod
 	)
 	density_ms = Time.get_ticks_msec() - t0
+	columns_ms = field.columns_ms
+	volume_ms = field.volume_ms
 	max_contract_error = field.max_contract_error
 
 	var bounds: Rect2 = Rect2(chunk_origin, Vector2.ONE * config.chunk_size)
@@ -74,8 +82,9 @@ func run() -> void:
 	water_data = WaterSurface.build(field, chunk_origin)
 	water_ms = Time.get_ticks_msec() - t0
 
-	t0 = Time.get_ticks_msec()
+	var t_dress: int = Time.get_ticks_msec()
 	if want_props and config.props_enabled:
+		var t_props: int = Time.get_ticks_msec()
 		props = PropPlacer.place(
 			config, prop_specs, field, region, sector.claims, chunk_origin
 		)
@@ -86,8 +95,10 @@ func run() -> void:
 			var existing: Array = props.get(house_id, [])
 			existing.append_array(house_props[house_id])
 			props[house_id] = existing
+		props_ms = Time.get_ticks_msec() - t_props
 
 	if want_clutter and config.props_enabled:
+		var t_clutter: int = Time.get_ticks_msec()
 		var clutter: Dictionary = GroundClutter.place(
 			config, clutter_specs, field, region, sector.claims, chunk_origin
 		)
@@ -95,9 +106,10 @@ func run() -> void:
 			var bag: Array = props.get(clutter_id, [])
 			bag.append_array(clutter[clutter_id])
 			props[clutter_id] = bag
+		clutter_ms = Time.get_ticks_msec() - t_clutter
 
 	for site in bridges:
 		bridge_builds.append(BridgeBuilder.build(site, chunk_origin, want_collision))
-	dress_ms = Time.get_ticks_msec() - t0
+	dress_ms = Time.get_ticks_msec() - t_dress
 
 	build_ms = Time.get_ticks_msec() - started

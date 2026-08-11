@@ -11,7 +11,6 @@ crate-type = ["cdylib"]
 [dependencies]
 fastnoise-lite = "1.1.1"
 godot = { version = "0.5.5", features = ["api-4-5", "experimental-threads"] }
-
 [profile.release]
 lto = true
 codegen-units = 1

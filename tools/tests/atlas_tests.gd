@@ -14,13 +14,15 @@ func _initialize() -> void:
 	_test_pack_roundtrip()
 	var atlas: ContinentAtlas = ContinentAtlas.generate(20260809, 128)
 	print(
-		"atlas 128²: %d ms | lakes %d | nodes %d | river edges %d | road edges %d | crossings %d" % [
+		"atlas 128²: %d ms | lakes %d | nodes %d | river edges %d | road edges %d | crossings %d | secondary massifs %d" % [
 			atlas.generate_ms, atlas.lakes.size(), atlas.nodes.size(),
-			atlas.river_ports.size(), atlas.road_ports.size(), atlas.crossings.size()
+			atlas.river_ports.size(), atlas.road_ports.size(), atlas.crossings.size(),
+			atlas.secondary_massif_count
 		]
 	)
 	_test_validate(atlas)
 	_test_climate_sanity(atlas)
+	_test_multi_scale_structure(atlas)
 	_test_edge_ports_shared(atlas)
 	_test_river_and_lake_sanity(atlas)
 	_test_population(atlas)
@@ -109,6 +111,13 @@ func _test_climate_sanity(atlas: ContinentAtlas) -> void:
 	_check("has land", land > atlas.size * 4)
 	_check("has lakes", lake > 0 and atlas.lakes.size() > 0)
 	_check("lake cells match lakes", lake > 0)
+	var lake_floor: int = maxi(8, ContinentAtlas.LAKE_TARGET_FULL * atlas.size / ContinentAtlas.SIZE)
+	# Placement is stochastic; require a healthy majority of the target count.
+	_check(
+		"lake count scaled",
+		atlas.lakes.size() >= maxi(4, lake_floor / 2),
+		"(%d lakes, floor %d)" % [atlas.lakes.size(), lake_floor]
+	)
 	_check("sea_surface_z is 0", atlas.sea_surface_z == 0)
 	_check("schema version", atlas.schema_version == ContinentAtlas.SCHEMA_VERSION)
 
@@ -125,6 +134,35 @@ func _test_climate_sanity(atlas: ContinentAtlas) -> void:
 		"ocean humidity saturated",
 		ocean_n > 0 and wet_ocean * 10 >= ocean_n * 9,
 		"(%d of %d)" % [wet_ocean, ocean_n]
+	)
+
+
+func _test_multi_scale_structure(atlas: ContinentAtlas) -> void:
+	print("- multi-scale structure")
+	_check(
+		"secondary massifs stamped",
+		atlas.secondary_massif_count >= 3,
+		"(%d)" % atlas.secondary_massif_count
+	)
+	var land: int = 0
+	var forest: int = 0
+	var mountain: int = 0
+	for i in atlas.cells.size():
+		var biome: int = AtlasPack.biome(atlas.cells[i])
+		if AtlasBiomes.is_land(biome):
+			land += 1
+		if biome == AtlasBiomes.Id.FOREST:
+			forest += 1
+		if (
+			AtlasBiomes.is_land(biome) or biome == AtlasBiomes.Id.LAKE
+		) and AtlasPack.elevation(atlas.cells[i]) >= 168:
+			mountain += 1
+	_check("has mountain loft", mountain > atlas.size, "(%d cells)" % mountain)
+	var forest_frac: float = float(forest) / float(maxi(land, 1))
+	_check(
+		"forest patch fraction",
+		forest_frac >= 0.04 and forest_frac <= 0.70,
+		"(%.1f%% of land)" % (forest_frac * 100.0)
 	)
 
 
@@ -186,6 +224,11 @@ func _test_river_and_lake_sanity(atlas: ContinentAtlas) -> void:
 		atlas.lakes.size() <= 1 or unique_shapes > 1,
 		"(%d distinct sizes of %d)" % [unique_shapes, atlas.lakes.size()]
 	)
+	var disconnected: int = 0
+	for lake in atlas.lakes:
+		if not atlas._lake_is_connected(lake):
+			disconnected += 1
+	_check("lakes contiguous", disconnected == 0, "(%d disconnected)" % disconnected)
 
 
 func _test_population(atlas: ContinentAtlas) -> void:

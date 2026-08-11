@@ -8,6 +8,13 @@ const SOLID: f32 = 1.0e6;
 const AIR: f32 = -1.0e6;
 const CAVE_SOLID_CAP: f32 = 9.0;
 const CAVE_STRENGTH: f32 = 26.0;
+/// Matches columns.rs — dry water marker across the FFI (not ±INF).
+const NO_WATER_THRESH: f32 = -1.0e19;
+
+#[inline]
+fn has_sheet(z: f32) -> bool {
+	z.is_finite() && z > NO_WATER_THRESH
+}
 
 #[inline]
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
@@ -46,11 +53,24 @@ pub fn build_volume(
 	let samples_h = p.samples_h as usize;
 	let count = samples_h * samples_h;
 	assert_eq!(surface_z.len(), count);
+	// Borrow packed storage; do not rayon here — ChunkJob already runs on
+	// Godot's WorkerThreadPool, and nested rayon pools deadlock under load.
+	let surface_z = surface_z.as_slice();
+	let corridor_mask = corridor_mask.as_slice();
+	let water_top = water_top.as_slice();
+	let overhang_amp = overhang_amp.as_slice();
+	assert_eq!(surface_z.len(), count);
+	assert_eq!(corridor_mask.len(), count);
+	assert_eq!(water_top.len(), count);
+	assert_eq!(overhang_amp.len(), count);
 
 	let mut lowest = f32::INFINITY;
 	let mut highest = f32::NEG_INFINITY;
 	for i in 0..count {
 		let s = surface_z[i];
+		if !(s.is_finite() && s > NO_WATER_THRESH) {
+			panic!("build_volume: surface_z[{i}] is not a land height ({s})");
+		}
 		lowest = lowest.min(s);
 		highest = highest.max(s);
 	}
@@ -87,24 +107,32 @@ pub fn build_volume(
 			let mut cave_allow = p.cave_enabled && mask > 0.35;
 			let mut cave_ceiling = surface - p.cave_top_depth;
 			let cave_floor = surface - p.cave_bottom_depth;
-			// GDScript: `water > -INF`. Non-finite means dry column.
-			if cave_allow && water.is_finite() {
+			if cave_allow && has_sheet(water) {
 				cave_ceiling = cave_ceiling.min(water - p.cave_water_clearance);
 				if cave_ceiling <= cave_floor {
 					cave_allow = false;
 				}
 			}
 
-			let base_index = iz * samples_y * samples_h + ix;
 			for iy in 0..samples_y {
 				let wy = y_min + iy as f32 * p.voxel;
 				let base = surface - wy;
 				let mut value = base;
 
+				// Deep uniform slabs: one compare, no noise / cave work.
+				if base > band + 1.0 {
+					values[(iz * samples_y + iy) * samples_h + ix] = SOLID;
+					continue;
+				}
+				if base < -band - 1.0 {
+					values[(iz * samples_y + iy) * samples_h + ix] = AIR;
+					continue;
+				}
+
 				if base > band {
-					value = if base > band + 1.0 { SOLID } else { base };
+					value = base;
 				} else if base < -band {
-					value = if base < -band - 1.0 { AIR } else { base };
+					value = base;
 				} else if overhang_amp_c > 0.05 {
 					value = base + overhang.get(wx, wy, wz) * overhang_amp_c;
 				}
@@ -120,7 +148,7 @@ pub fn build_volume(
 					}
 				}
 
-				values[base_index + iy * samples_h] = value;
+				values[(iz * samples_y + iy) * samples_h + ix] = value;
 			}
 		}
 	}

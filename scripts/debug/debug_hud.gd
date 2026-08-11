@@ -88,12 +88,16 @@ func _process(_delta: float) -> void:
 		])
 
 	lines.append(
-		"last chunk %d ms (dens %d  mesh %d  water %d  dress %d)   deficit %.3f m" % [
+		"last chunk %d ms (dens %d=%d+%d  mesh %d  water %d  dress %d=%d+%d)   deficit %.3f m" % [
 			streamer.stat_last_build_ms,
 			streamer.stat_last_density_ms,
+			streamer.stat_last_columns_ms,
+			streamer.stat_last_volume_ms,
 			streamer.stat_last_mesh_ms,
 			streamer.stat_last_water_ms,
 			streamer.stat_last_dress_ms,
+			streamer.stat_last_props_ms,
+			streamer.stat_last_clutter_ms,
 			streamer.stat_worst_contract_error,
 		]
 	)
